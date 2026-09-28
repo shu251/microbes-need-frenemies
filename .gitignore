@@ -1,0 +1,25 @@
+# R / RStudio
+.Rhistory
+.RData
+.Rproj.user/
+.DS_Store
+
+# Quarto build cache (keep _freeze/ — it lets the site rebuild without the data)
+/.quarto/
+
+# Large data: GitHub rejects files > 100 MB. Archive these on Zenodo/BCO-DMO instead.
+data/processed/*.RData
+data/processed/*.csv
+data/raw/counts.RData
+
+# Scratch
+_to_delete/
+.discard/
+
+**/*.quarto_ipynb
+
+# Stray per-file renders: rendering one .qmd outside the project context ignores
+# output-dir and writes the html next to the notebook. Rendered output belongs in
+# docs/ only -- render from the project root (see _quarto.yml).
+scripts/*.html
+scripts/*_files/
