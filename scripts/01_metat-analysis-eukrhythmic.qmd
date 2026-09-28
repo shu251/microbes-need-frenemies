@@ -1,0 +1,221 @@
+---
+title: "01 — metaT overview & import (eukrhythmic-to-tximport)"
+date: last-modified
+format:
+  html:
+    toc: true
+    code-fold: show
+    eval: FALSE
+---
+# Set up
+
+Overview/setup file 1. Imports the eukrhythmic/Salmon quantifications into two
+`tximport` objects and gives a first look at the samples. **02_metat** then
+inputs the annotated data. Nothing here re-runs on every question — the question
+qmds read the saved objects.
+
+```{r setup, message=FALSE, warning=FALSE}
+source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R")  # locator: works from project root (render) or scripts/ (interactive)
+library(tximport) # step-specific: import only, not in _setup.R
+```
+
+## Sample sheet
+
+`sample_meta` is replicate-aware (`resolve_sample_unit()`): `sample_id` is unique
+per physical replicate, `sample_unit` groups replicates of the same vent.
+
+See _setup for naming this object. 
+
+```{r samples}
+sample_meta |>
+  count(field, vent_bin) |>
+  arrange(field, vent_bin)
+
+# replicate units (kept as separate biological replicates, never collapsed here)
+sample_meta |>
+  filter(n_reps > 1) |>
+  select(sample_id, sample_unit, field, site, n_reps) |>
+  arrange(sample_unit)
+```
+
+## Sample list
+```{r}
+sample_list <- read.csv("data/raw/frenemies-sample-list.csv")
+fastq_list <- read.csv("data/raw/frenemies-fastq-list.csv", header = FALSE)
+```
+
+Fastq files were run on both lanes 1 and 2. So will treat as *technical* replicates for now. Separate fastq_list file so we can left join the sample_list information.
+
+For assembly groupings, we want diversity represented, but too much diversity may cause chimeric contigs. And if we put in too many reads, this can be a bottleneck for assembly (computationally).
+
+Here, we decided to separate by vent field, sample type (vent vs. non-vent), and if there were many vents (like in the MCR sites), each vent was split into it's own assembly. Based on the 18S analysis, we know that vents even meters apart from one another can have very distinct and diverse communities. For the MCR work, some of the vent (in situ) samples were paired with shipboard grazing assays. These are assembled with the vent samples (as the original fluid was the same) and represent time final for the grazing experiments.
+
+Use: `R/hprc/01_create_samplelist.R`
+```{r}
+#| echo: false
+# head(fastq_list)
+# Create sample list for eukrhythmic input
+sample_list_wassemblygroup <- fastq_list %>% 
+  mutate(FastqFile = str_remove_all(V1, "_R1_001.fastq.gz"),
+         SampleName = str_remove_all(FastqFile, "_S\\d+_L00\\d+")) %>% 
+  left_join(sample_list %>% select(SampleName = SITE_NUM_FIELDYR_VENT_EXP_SAMPLEID, SAMPLEID, everything())) %>% 
+  mutate(VENT = case_when(
+    VENT == "Mustard Stand" ~ "MustardStand",
+    TRUE ~ VENT
+  )) %>% 
+  mutate(TYPE = case_when( #Option to use casewhen for setting assembly grouping
+  grepl("Plume", VENT) ~ "nonvent",
+  grepl("plume", VENT) ~ "nonvent",
+  grepl("Plus30m", VENT) ~ "nonvent",
+  grepl("BSW", VENT) ~ "nonvent",
+  grepl("Background", VENT) ~ "nonvent",
+  grepl("Transit", VENT) ~ "nonvent",
+  TRUE ~ "vent"
+    )) %>%
+  mutate(FIELD = case_when(
+    FIELDYR == "VonDamm2020" ~ "VONDAMM",
+    FIELDYR == "Piccard2020" ~ "PICCARD",
+    TRUE ~ SITE
+  )) %>% 
+  mutate(AXIAL_CORR = case_when(
+    grepl("IntlDistrict", VENT) ~ "IntlDistrict",
+    grepl("ASHES", VENT) ~ "ASHES",
+    grepl("Transit", VENT) ~ "Background",
+    TRUE ~ VENT
+  )) %>% 
+  mutate(AssemblyGroup = case_when(
+    SITE == "MCR" ~ paste(FIELD, VENT, TYPE, sep = "_"),
+    SITE == "GR" ~ paste(FIELD, FIELDYR, TYPE, sep = "_"),
+    SITE == "AXIAL" ~ paste(FIELD, AXIAL_CORR, TYPE, sep = "_")
+  )) %>% 
+  # unite("AssemblyGroup", c(FIELD, EXP, TYPE), remove = FALSE) %>% 
+  mutate(SampleID = SampleName) %>% 
+  select(SampleName, SampleID, AssemblyGroup, FastqFile, NUMBER = LAB_NUM, FIELD, SITE, FIELDYR, VENT, EXP, TYPE, SAMPLE_NAME, ORIGIN, SAMPLEID)
+#SITE_NUM_FIELDYR_VENT_EXP_SAMPLEID
+table(sample_list_wassemblygroup$AssemblyGroup)
+# View(sample_list_wassemblygroup)
+```
+
+```{r}
+# write_delim(sample_list_wassemblygroup %>% select(SampleName, SampleID, AssemblyGroup, FastqFile), file = "data/raw/frenemies-metat-samplelist.txt", delim = "\t")
+```
+
+## Eukrhythmic information
+
+> Krinos
+Location on TAMU HPRC: `/scratch/group/hu-lab/frenemies`
+
+
+## Process counts with tximport
+
+First run `R/hprc/01_create_samplelist.R`. This will output a sample list ready to be run with the tximport step.
+Use: 
+Then execute `R/hprc/02_run_tximport.R`. This will import all salmon count files and process transcript length to get transcript-level estimates as counts.
+
+Output from above includes 2 RData files. `tximport-feb-2025.RData` is a txi class objects for the MCR and GR data and `dfs_gr_mcr_feb2025.RData` has large dataframes with the TPM values from the txi objects.
+
+File location:
+
+```         
+#save(txi_frenemies_mcr_gr, sample_merged_gr_mcr, file = "/scratch/group/hu-lab/frenemies/euk-metaT-eukrhythmic-output/tximport-feb-2025.RData")
+#save(lenscaled_TPM, gr_mcr_lenscaled_TPM_df, mean_gr_mcr_TPM_df, file = "/scratch/group/hu-lab/frenemies/euk-metaT-eukrhythmic-output/dfs_gr_mcr_feb2025.RData")
+```
+
+The goal is to get a table with samples that reflects the *lengthScaledTPM*. This is calculated using *tximport*, where the the within-gene summed TPM is multiplied by the average transcript length, averaged over samples, then scaled up to the per-sample library size.
+
+The output can be treated as a *TPM* that has been corrected for differences in average transcript length across samples.
+
+# Process large count files
+
+From `dfs_gr_mcr_feb2025.RData` we need to create downstream files that can be more easily used in R locally.
+
+## Align with annotation information
+
+Use script `R/hprc/03_compile_dfs.R`.
+
+```{r}
+# Compile large datasets for use in R. 
+cat("Importing files\n")
+load("/scratch/group/hu-lab/frenemies/euk-metaT-eukrhythmic-output/dfs_gr_mcr_feb2025.RData", verbose = TRUE)
+# lenscaled_TPM, gr_mcr_lenscaled_TPM_df, mean_gr_mcr_TPM_df
+
+taxfxn <- read.table("/scratch/group/hu-lab/frenemies/euk-metaT-eukrhythmic-output/TaxonomicAndFunctionalAnnotations.csv", header = TRUE, sep = "\t")
+
+tx2gene_in <- taxfxn %>% 
+  separate_longer_delim(KEGG_ko, delim = ",") %>% # Remove comma separated KEGG IDs
+  select(SequenceID, seed_ortholog, COG_category, GOs, KEGG = KEGG_ko, PFAMs, classification_level, full_classification, classification, max_pid) %>% 
+  dplyr::mutate(SEQ_ID = stringr::str_remove(SequenceID, ".p[:digit:]$"))
+
+cat("Modified taxfxn:\n")
+head(tx2gene_in)
+# head(rownames(mean_gr_mcr_TPM_df))
+
+cat("Files imported.\n")
+
+cat("View mean_gr_mcr_TPM_df\n\n")
+head(mean_gr_mcr_TPM_df)
+
+cat("Pivot to long format:\n")
+# Make longer data frame
+long_frenemies <- mean_gr_mcr_TPM_df %>%
+  rowwise() %>%
+  # Add column with number of samples with a 0.
+  mutate(NUM_ZERO = sum(c_across(starts_with("mean.")) == 0)) %>%
+  rownames_to_column(var = "SEQ_ID") %>%
+  pivot_longer(cols = starts_with("mean"), values_to = "scaledTPM") %>%
+  # Remove zeroes
+  filter(scaledTPM > 0) %>%
+  separate(name, c("meanfield", "LIBRARY_NUM", "fieldyear", "LOCATION", "SAMPLETYPE", "SAMPLEID"), "_",
+           remove = FALSE) %>%
+  # Isolate the in situ samples only
+  filter(SAMPLETYPE == "insitu") %>% 
+  select(-meanfield, -name) %>%
+  mutate(VENT_FIELD = case_when(grepl("Piccard", fieldyear) ~ "Piccard",
+                                grepl("VonDamm", fieldyear) ~ "Von Damm",
+                                grepl("Axial", fieldyear) ~ "Axial",
+                                grepl("Gorda", fieldyear) ~ "Gorda Ridge")) %>%
+  mutate(VENT_BIN = case_when(
+    (LOCATION == "Background" | LOCATION == "Plume" | LOCATION == "BSW") ~ "Non-vent",
+    grepl("IntlDistrict", LOCATION) ~ "Non-vent",
+    grepl("ASHES", LOCATION) ~ "Non-vent",
+    TRUE ~ "Vent"
+  ))
+
+
+
+# Add in annotations, revise taxa
+as_is <- c("Amoebozoa", "Apusozoa", "Excavata", "Hacrobia", "Archaeplastida")
+
+# head(mean_gr_mcr_TPM_df)
+# head(taxfxn)
+
+long_frenemies_annot <- long_frenemies %>%
+  left_join(taxfxn, by = "SEQ_ID") %>%
+  separate(full_classification, c("Domain", "Supergroup", "Phylum", "Class", "Order", "Family", "Genus_spp"), sep = "; ", remove = FALSE) %>%
+  mutate(SUPERGROUP_18S = case_when(
+    Phylum == "Ciliophora" ~ "Alveolata-Ciliophora",
+    Phylum == "Dinophyta" ~ "Alveolata-Dinoflagellata",
+    # Phylum == "Perkinsea" ~ "Protalveolata",
+    # Phylum == "Colponemidia" ~ "Protalveolata",
+    # Phylum == "Chromerida" ~ "Protalveolata",
+    Supergroup == "Alveolata" ~ "Other Alveolata",
+    Supergroup %in% as_is ~ Supergroup,
+    Supergroup == "Haptista" ~ "Hacrobia",
+    Phylum == "Radiolaria" ~ "Rhizaria-Radiolaria",
+    Phylum == "Cercozoa" ~ "Rhizaria-Cercozoa",
+    (Supergroup == "Rhizaria" & Phylum != "Radiolaria" & Phylum != "Cercozoa") ~ "Rhizaria",
+    Order == "Bigyra" ~ "Stramenopiles-Opalozoa;Sagenista",
+    Class == "Ochromonadales" ~ "Stramenopiles-Ochrophyta",
+    Supergroup == "Stramenopiles" ~ "Stramenopiles",
+    Supergroup == "Opisthokonta" ~ "Opisthokonta",
+    (is.na(Supergroup) | Supergroup == "Eukaryota incertae sedis") ~ "Unknown Eukaryota",
+    TRUE ~ "Other-metaT only"))
+
+cat("Completed data anneal, output:\n")
+
+head(long_frenemies_annot)
+
+# Save output R object files
+save(long_frenemies, long_frenemies_annot, file = "/scratch/group/hu-lab/frenemies/euk-metaT-eukrhythmic-output/frenemies-longdfs-gr-mcr.RData")
+cat("SAVED\n")
+```
