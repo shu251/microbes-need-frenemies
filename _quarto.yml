@@ -1,0 +1,79 @@
+project:
+  type: website
+  output-dir: docs          # GitHub Pages: serve from /docs on main
+  execute-dir: project      # every path in the qmds is project-root-relative
+  render:                   # explicit list: ARCHIVE/, _to_delete/, .discard/ never render
+    - index.qmd
+    - scripts/01_metat-analysis-eukrhythmic.qmd
+    - scripts/02_metat-data-overview.qmd
+    - scripts/03_taxonomy_grain_ladder.qmd
+    - scripts/04_taxonomy_vs_function.qmd
+    - scripts/05-compare-environmental.qmd
+    - scripts/06-heterotrophy.qmd
+    - scripts/07-fgsea-enrichment.qmd
+
+# ---------------------------------------------------------------------------
+# RENDER FROM THE PROJECT ROOT, NOT FILE BY FILE.
+#
+#   quarto render                          # whole site -> docs/
+#   quarto render scripts/06-heterotrophy.qmd --to html   # one doc, still -> docs/
+#
+# `output-dir: docs` above is a PROJECT setting. RStudio's Render button (and a
+# bare `quarto render <file>.qmd` run from inside scripts/) renders the single
+# document outside the project context, which ignores output-dir and drops the
+# .html plus a <name>_files/ folder next to the .qmd. Five of those had
+# accumulated in scripts/ and were moved to
+# scripts/_to_delete/pre_reorg_20260926/stray_renders/ on 2026-09-26.
+#
+# If you must use the RStudio button, use the Build pane's "Render Website"
+# rather than "Render", or run `quarto render` in the Terminal at the root.
+#
+# Prerequisite for 06/07: run `Rscript scripts/00_build_het_gene_reference.R`
+# first if either curated gene list has changed. It writes
+# data/gene-lists/het_gene_reference.csv, which both documents read.
+# ---------------------------------------------------------------------------
+
+execute:
+  freeze: auto              # a full-site render re-runs only qmds whose source changed;
+                            # commit _freeze/ so the site rebuilds without the RData
+
+website:
+  title: "Frenemies metaT"
+  # site-url: "https://<github-user>.github.io/<repo>/"    # [FILL] once the repo exists
+  # repo-url: "https://github.com/<github-user>/<repo>"    # [FILL]
+  # repo-actions: [source, issue]
+  search: true
+  page-navigation: true
+  navbar:
+    background: light
+    left:
+      - href: index.qmd
+        text: Overview
+  sidebar:
+    style: docked
+    search: false
+    contents:
+      - index.qmd
+      - section: "Data"
+        contents:
+          - scripts/01_metat-analysis-eukrhythmic.qmd
+          - scripts/02_metat-data-overview.qmd
+      - section: "Analyses"
+        contents:
+          - scripts/03_taxonomy_grain_ladder.qmd
+          - scripts/04_taxonomy_vs_function.qmd
+          - scripts/05-compare-environmental.qmd
+          - scripts/06-heterotrophy.qmd
+          - scripts/07-fgsea-enrichment.qmd
+  page-footer:
+    left: "Hu Lab · Texas A&M University, Department of Oceanography"
+    right: "Built with [Quarto](https://quarto.org)"
+
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    df-print: paged
+    fig-align: center
