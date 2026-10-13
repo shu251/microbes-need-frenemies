@@ -1,5 +1,5 @@
 ---
-title: "01 — metaT overview & import (eukrhythmic-to-tximport)"
+title: "01 - metaT overview & import (eukrhythmic-to-tximport)"
 date: last-modified
 format:
   html:
@@ -9,9 +9,7 @@ format:
 ---
 # Set up
 
-Overview/setup file 1. Imports the eukrhythmic/Salmon quantifications into two
-`tximport` objects and gives a first look at the samples. **02_metat** then
-inputs the annotated data. Nothing here re-runs on every question — the question
+Overview/setup file 1. Imports the eukrhythmic/Salmon quantifications into two `tximport` objects and gives a first look at the samples. **02_metat** then inputs the annotated data. Nothing here re-runs on every question — the question
 qmds read the saved objects.
 
 ```{r setup, message=FALSE, warning=FALSE}
@@ -21,8 +19,7 @@ library(tximport) # step-specific: import only, not in _setup.R
 
 ## Sample sheet
 
-`sample_meta` is replicate-aware (`resolve_sample_unit()`): `sample_id` is unique
-per physical replicate, `sample_unit` groups replicates of the same vent.
+`sample_meta` is replicate-aware (`resolve_sample_unit()`): `sample_id` is unique per physical replicate, `sample_unit` groups replicates of the same vent.
 
 See _setup for naming this object. 
 
@@ -102,9 +99,7 @@ table(sample_list_wassemblygroup$AssemblyGroup)
 
 ## Eukrhythmic information
 
-> Krinos
-Location on TAMU HPRC: `/scratch/group/hu-lab/frenemies`
-
+Location on HPRC: `/scratch/group/hu-lab/frenemies`
 
 ## Process counts with tximport
 
