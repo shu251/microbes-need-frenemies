@@ -534,7 +534,7 @@ supp_tax_assigned_level <- long_frenemies_annot %>%
 ```{r, fig.width=8, fig.height=10}
 domain + supp_tax_assigned_level +
   plot_layout(nrow = 2)
-
+#ggsave("figures/domain-composition.svg", width = 8, height = 10, device = "svg", limitsize = FALSE)
 ```
 
 ## By taxonomic groups
@@ -555,7 +555,6 @@ group_unit <- unit_expression(paired, "cur_group")
 ```{r fig-group-bars}
 #| fig-width: 9
 #| fig-height: 5
-#| fig-cap: "Composition of unit expression summed to curated group (02 curation), one bar per sample unit. Bar segments give each group's proportion of the unit's scaledTPM. Units are grouped by habitat (13 vent, 6 non-vent)."
 group_present <- intersect(SUPERGROUP_0_ordering, unique(group_unit$cur_group))
 
 fig_group_bars <- group_unit |>
@@ -579,7 +578,7 @@ The habitat facet is dropped here so bar rows line up with the heat map and dist
 
 ```{r, fig.height=10, fig.width=22}
 vent_heatmap + (fig_group_bars + facet_null()) + euclidean_all + plot_layout(nrow = 1, guides = "collect", widths = c(0.5, 1, 1))
-ggsave("figures/large-heatmap.svg", width = 22, height = 10, device = "svg", limitsize = FALSE)
+#ggsave("figures/large-heatmap.svg", width = 22, height = 10, device = "svg", limitsize = FALSE)
 ```
 
 # Tables & Supplementary tables

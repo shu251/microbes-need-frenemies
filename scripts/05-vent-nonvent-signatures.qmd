@@ -81,7 +81,7 @@ depth_check <- ko_unit |>
   arrange(unit_total)
 
 depth_check |> mutate(unit_total = round(unit_total))
-
+?cor()
 depth_check |>
   summarise(rho_tpm_floor = cor(unit_total, ko_tpm_floor, method = "spearman"),
             rho_combined  = cor(unit_total, ko_detected, method = "spearman"),
@@ -316,6 +316,9 @@ fig_delta_dist
 #| warning: false
 #| fig-cap: "Proportion of unit expression (scaledTPM) for each curated group in vent and non-vent units. Points are sample units (triangles, vent, n = 13; circles, non-vent, n = 6), with zero where a group is absent; horizontal bars mark the habitat median. Asterisks mark groups whose Cliff's delta on robust-CLR values exceeds the label-permutation max-T threshold (95th percentile of the maximum absolute delta over all groups)."
 habitat_pal <- c(Vent = "#b74a70", `Non-vent` = "#346D6E")
+
+# groups in display order, restricted to those present in these units
+group_present <- intersect(SUPERGROUP_0_ordering, unique(group_unit$cur_group))
 
 group_pts <- complete_units(group_unit, units, "cur_group") |>
   mutate(cur_group = factor(cur_group, levels = rev(group_present)))

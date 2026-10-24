@@ -5,11 +5,13 @@ project:
   render:                   # explicit list: ARCHIVE/, _to_delete/, .discard/ never render
     - index.qmd
     - scripts/01_metat-analysis-eukrhythmic.qmd
-    - scripts/02_metat-data-overview.qmd
-    - scripts/03_taxonomy_grain_ladder.qmd
+    - scripts/02_taxonomy_grain_ladder.qmd
+    - scripts/03_metat-data-overview.qmd
     - scripts/04_taxonomy_vs_function.qmd
-    - scripts/05-compare-environmental.qmd
+    - scripts/05-vent-nonvent-signatures.qmd
+    - scripts/05b-lineage-profiles.qmd
     - scripts/06-heterotrophy.qmd
+    - scripts/06b-trophic-lineages.qmd
     - scripts/07-fgsea-enrichment.qmd
 
 # ---------------------------------------------------------------------------
@@ -28,6 +30,8 @@ project:
 # If you must use the RStudio button, use the Build pane's "Render Website"
 # rather than "Render", or run `quarto render` in the Terminal at the root.
 #
+# Order for the presence/absence chain: 05 -> 05b -> 06 -> 07 (05b reads 05's
+# tables; 06 reads 05's and 05b's, incl. 05b_carrier_pairs.csv.gz; 07 reads 06's).
 # Prerequisite for 06/07: run `Rscript scripts/00_build_het_gene_reference.R`
 # first if either curated gene list has changed. It writes
 # data/gene-lists/het_gene_reference.csv, which both documents read.
@@ -57,13 +61,15 @@ website:
       - section: "Data"
         contents:
           - scripts/01_metat-analysis-eukrhythmic.qmd
-          - scripts/02_metat-data-overview.qmd
+          - scripts/02_taxonomy_grain_ladder.qmd
+          - scripts/03_metat-data-overview.qmd
       - section: "Analyses"
         contents:
-          - scripts/03_taxonomy_grain_ladder.qmd
           - scripts/04_taxonomy_vs_function.qmd
-          - scripts/05-compare-environmental.qmd
+          - scripts/05-vent-nonvent-signatures.qmd
+          - scripts/05b-lineage-profiles.qmd
           - scripts/06-heterotrophy.qmd
+          - scripts/06b-trophic-lineages.qmd
           - scripts/07-fgsea-enrichment.qmd
   page-footer:
     left: "Hu Lab · Texas A&M University, Department of Oceanography"
