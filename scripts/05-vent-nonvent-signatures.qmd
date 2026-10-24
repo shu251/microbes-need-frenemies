@@ -90,7 +90,7 @@ depth_check |>
             .by = vent_bin)
 ```
 
-Set a detection limit.
+Set a detection limit: the above rule for >min_tpm and the >min_per_million will ultaimtatley work to reduce the within-habitat depth dependence. We have a very different number of vent sites per field, so that is as sampling bias to consider. non-vent samples are too small to assess
 
 # 2. Who leads each habitat
 
