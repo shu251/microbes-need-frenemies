@@ -1,0 +1,24 @@
+# Ocean Storm house palette
+color:
+  palette:
+    slate-navy: "#304F6E"
+    ink:        "#474140"
+    deep-teal:  "#346D6E"
+    slate-blue: "#659ABC"
+    sky:        "#82BADC"
+    sand:       "#CCAF8E"
+    gold:       "#F3D9A3"
+    sage:       "#75877B"
+  foreground: ink
+  background: "#FFFFFF"
+  primary: deep-teal
+  secondary: slate-blue
+  info: slate-blue
+  success: sage
+  warning: gold
+typography:
+  fonts:
+    - family: Helvetica
+      source: system
+  base: Helvetica
+  headings: { family: Helvetica, color: slate-navy, weight: 600 }
