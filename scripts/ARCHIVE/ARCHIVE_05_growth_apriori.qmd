@@ -1,0 +1,608 @@
+---
+title: "ARCHIVE — 05 a priori growth test and PFAM panels"
+execute:
+  eval: false
+---
+
+>SKH: removed from 05-compare-environmental.qmd on 2026-10-13 (no a priori category cleared BH; the exploratory category scan stays in 05). Kept unedited for reference; not run.
+
+# Functional investment along the vent gradient
+
+The community-level result says environment structures both profiles but explains a modest share of either. *What functional profiles shift across the vent sites?* Pool by functional categories (COG) and KEGG categories to look for patterns. 
+
+Hypothesis: we have warmer, lower Mg, more acidic vent fluid. This should reflect or be translated into some change in growth signatures at the gene level. Examples from COG:
+* translation, ribosome biogenesis
+* protein folding and turnover
+* energy conversion
+
+*Do we see evidence of any changes in growth parameters for microeukaryotes?* Do we see anything along a specific environmental gradient. 
+
+_Using COG, KEGG, and pfam_:
+
+1. **COG functional categories**: Every KO-annotated transcript carries a COG letter from the same eggNOG annotation used throughout, so the category composition is complete. WIll be broader than other inquires below; COG J is translation machinery broadly (ribosomal proteins *and* tRNA synthetases, initiation and elongation factors), not ribosomes alone.
+
+2. **KEGG BRITE level-B categories**: Same design as COG, but each KO is placed in KEGG functional categories (_Translation; Folding, sorting and degradation; Energy metabolism_) from BRITE `ko00001` hierarchy. KEGG groupings tend to resolve microeukaryote function better than COG letters. The cost is coverage: only KOs with a BRITE level-B assignment contribute, and the mapped share of expression is reported.
+
+3. **PFAM-matched panels** (sensitivity). Sharper a priori sets — ribosomal proteins, chaperones, oxidative-phosphorylation complexes — matched by regex against the `PFAMs` column. Higher resolution, but the membership is a text match, so the chunk prints every PFAM name it caught for auditing.
+
+All tiers use the same 13 vent units, the same transcripts as the dbRDA, and the same retained predictors.
+
+> **Metatranscriptome abundances are compositional**, so "reduced investment in translation" means a smaller share of expression, not fewer transcripts per cell. The rclr transform makes that explicit. Interprte as "relative"
+
+
+## Configure the functional tiers
+
+```{r growth-config}
+# COG functional categories (Galperin et al. 2021, Nucleic Acids Res 49:D274-D281). Single letters, as eggNOG-mapper emits them.
+COG_DESCRIPTIONS <- c(
+  J = "Translation, ribosomal structure and biogenesis", # USE THIS
+  A = "RNA processing and modification",
+  K = "Transcription",
+  L = "Replication, recombination and repair",
+  B = "Chromatin structure and dynamics",
+  D = "Cell cycle control, cell division, chromosome partitioning",
+  Y = "Nuclear structure",
+  V = "Defense mechanisms",
+  T = "Signal transduction mechanisms",
+  M = "Cell wall/membrane/envelope biogenesis",
+  N = "Cell motility",
+  Z = "Cytoskeleton",
+  W = "Extracellular structures",
+  U = "Intracellular trafficking, secretion, vesicular transport",
+  O = "Post-translational modification, protein turnover, chaperones", # USE THIS
+  X = "Mobilome: prophages, transposons",
+  C = "Energy production and conversion", # USE THIS
+  G = "Carbohydrate transport and metabolism",
+  E = "Amino acid transport and metabolism",
+  F = "Nucleotide transport and metabolism",
+  H = "Coenzyme transport and metabolism",
+  I = "Lipid transport and metabolism",
+  P = "Inorganic ion transport and metabolism",
+  Q = "Secondary metabolites biosynthesis, transport, catabolism",
+  R = "General function prediction only",
+  S = "Function unknown")
+
+COG_SELECT <- c("J", "O", "C")
+
+# PFAMs AUDIT
+PFAM_PANELS <- c(
+  ribosomal_protein = "ribosomal_|ribosomal protein",
+  chaperone = "hsp[0-9]|cpn[0-9]|cpn60|dnaj|grpe|prefoldin|chaperon|tcp1|clpb",
+  oxidative_phosphoryl = "^cox[0-9]|cytochrom|atp-synt|complex1|nadhdh|oxidored_q|ubiq_cyt|ucr|qcr")
+
+# Permutations for the category / panel correlations.
+N_PERM_CAT <- 9999
+
+# KO map BRITE hierarchy `ko00001`
+KEGG_BRITE_FILE <- "data/external/ko00001.keg"
+# rm animal-centric (Organismal Systems, Human Diseases) and non-pathways
+KEGG_EXCLUDE_A  <- c("09150", "09160", "09180", "09190")
+# KEGG level B:
+## 09122 Translation
+## 09123 Folding, sorting and degradation
+## 09102 Energy metabolism
+KEGG_SELECT    <- c("09122", "09123", "09102")
+```
+
+## One Spearman helper for both tiers
+
+Spearman rho per column of `z` against `x`, with a permutation value `x` is shuffled across units, so the null value preserves each feature's own distribution and only breaks its link to the variable. Returns rho and a two-sided permutation p; BH correction is applied later, across the whole reported family.
+
+```{r growth-spearman-fn}
+spearman_perm <- function(z, x, n_perm = N_PERM_CAT) {
+  stopifnot(nrow(z) == length(x))
+# A feature with the same value in every unit (e.g. a category absent from all of them) has no ranks to correlate and would return NaN. Drop those and say so.
+  keep <- apply(z, 2, \(col) stats::sd(col) > 0)
+  if (any(!keep)) {
+    message(glue::glue("  dropped {sum(!keep)} zero-variance feature(s): ","{paste(colnames(z)[!keep], collapse = ', ')}"))
+  }
+  z <- z[, keep, drop = FALSE]
+  if (ncol(z) == 0) stop("No variable features left to correlate.", call. = FALSE) #if none
+  ##
+  rz <- scale(apply(z, 2, rank))
+  rx <- as.numeric(scale(rank(x)))
+  n  <- length(x)
+  rho <- as.vector(crossprod(rz, rx)) / (n - 1)
+  ##
+  perm <- replicate(n_perm, sample(rx)) # units x n_perm
+  null <- abs(crossprod(rz, perm)) / (n - 1)  # features x n_perm
+  ## form table
+  tibble::tibble(
+    feature = colnames(z),
+    rho     = rho,
+    p_perm  = (1 + rowSums(null >= abs(rho))) / (1 + n_perm))
+}
+```
+
+## Tier 1 — COG
+
+A transcript carrying several COG letters (e.g. `"BDLTU"`) needs to split scaledTPM across them (same as `prep_paired()`). Categories are then summed per biological unit with the same zero-aware mean (`sum / n_reps`), and the units x category matrix is rclr-transformed. All 26 categories are kept, including `R` and `S` (uninformative but real expression); can't drop, because we need CLR reference. 
+
+```{r growth-cog-matrix}
+#| message: true
+if (!"COG_category" %in% names(paired_mod)) {
+  stop("`COG_category` is not in the annotation table. This section needs the eggNOG ",
+       "COG column carried from long_frenemies_annot_tax.", call. = FALSE)
+}
+
+# What are the counts. 02 carries SEQ_ID; fall back to SequenceID, and if neither survived, count the row.
+
+TX_ID <- c("SEQ_ID", "SequenceID")[c("SEQ_ID", "SequenceID") %in% names(paired_mod)][1]
+if (is.na(TX_ID)) {
+  message("No SEQ_ID/SequenceID column: n_transcripts counts transcript x KO rows, ",
+          "not distinct transcripts.")
+}
+
+cog_split <- paired_mod |>
+  filter(vent_bin == "Vent",
+                !is.na(COG_category), !COG_category %in% c("", "-")) |>
+  mutate(.txid = if (!is.na(TX_ID)) .data[[TX_ID]] else row_number(),
+                n_cog = nchar(COG_category)) |>
+  separate_longer_position(COG_category, width = 1) |>
+  rename(cog = COG_category) |>
+  mutate(scaledTPM = scaledTPM / n_cog)
+
+cog_by_unit <- cog_split |>
+  group_by(unit = .data[[UNIT_COL]], n_reps, cog) |>
+  summarise(tpm = sum(scaledTPM) / dplyr::first(n_reps), .groups = "drop") |>
+  select(-n_reps)
+
+cog_mat <- cog_by_unit |>
+  pivot_wider(names_from = cog, values_from = tpm, values_fill = 0) |>
+  tibble::column_to_rownames("unit") |>
+  as.matrix()
+
+# align rows to the predictor table used by the dbRDA
+cog_mat <- cog_mat[env_model$unit, , drop = FALSE]
+cog_z <- rclr_transform(cog_mat)
+
+# Categories must actually be present, or the prediction cannot be tested. Filter before cog_support, which reads COG_SELECT
+
+COG_SELECT <- COG_SELECT[COG_SELECT %in% colnames(cog_mat)]
+if (!length(COG_SELECT)) {
+  stop("None of the a priori COG categories (J/O/C) are present in the vent data.",
+       call. = FALSE)
+}
+
+# how much each category rests on -- the reader should see this before any rho
+cog_support <- cog_split |>
+  summarise(n_transcripts = n_distinct(.txid), 
+            n_kos = n_distinct(ko_id),
+            total_tpm = sum(scaledTPM),
+            .by = cog) |>
+  mutate(pct_tpm = round(100 * total_tpm / sum(total_tpm), 2),
+                description = unname(COG_DESCRIPTIONS[cog]),
+                a_priori= cog %in% COG_SELECT) |>
+  arrange(desc(total_tpm))
+
+message(glue::glue("{nrow(cog_mat)} vent units x {ncol(cog_mat)} COG categories | ",
+                   "a priori present: {paste(COG_SELECT, collapse = ', ')}"))
+cog_support |> dplyr::select(cog, description, a_priori, n_kos, n_transcripts, pct_tpm) |>
+  print(n = Inf)
+```
+
+> **Check first.** If `J`, `O` or `C` has only a few KOs, the slow-growth test has little behind it and should be reported as inconclusive rather than negative. `S` (function unknown) carrying a large share of TPM is normal for protist metatranscriptomes and is worth one sentence in the results.
+
+```{r growth-cog-corr}
+#| message: true
+set.seed(params$seed)
+
+cog_gradient <- purrr::map_dfr(env_keep, \(v)
+  spearman_perm(cog_z, env_model[[v]]) |>
+    mutate(variable = v, .before = 1)) |>
+  rename(cog = feature) |>
+  # BH across the whole reported family (every category x every variable)
+  mutate(q_bh = stats::p.adjust(p_perm, method = "BH")) |>
+  left_join(select(cog_support, cog, description, n_kos, n_transcripts,
+                                 pct_tpm, a_priori),
+                   by = "cog") |>
+  mutate(direction = if_else(rho < 0, "decreases", "increases"),
+                significant = q_bh <= params$fdr_alpha) |>
+  arrange(variable, rho)
+
+# The pre-specified test, stated on its own so it cannot be lost in the full table.
+cog_apriori_result <- cog_gradient |>
+  filter(a_priori) |>
+  select(variable, cog, description, n_kos, pct_tpm, rho, p_perm, q_bh, direction) |>
+  mutate(across(c(rho, p_perm, q_bh), \(x) round(x, 4))) |>
+  arrange(variable, cog)
+
+cog_apriori_result |> print(n = Inf)
+```
+
+> **Read the three a priori rows against the prediction.** The slow-growth reading needs `J`, `O` and `C` all negative with temperature. Two of three, or a negative rho that does not clear BH, is a too weak or not well established
+
+```{r growth-cog-table}
+#| message: true
+cog_gradient |>
+  filter(significant) |>
+  select(variable, cog, description, rho, q_bh, a_priori) |>
+  mutate(across(c(rho, q_bh), \(x) round(x, 4))) |>
+  print(n = Inf)
+
+message(glue::glue(
+  "{sum(cog_gradient$significant)} of {nrow(cog_gradient)} category x variable tests ",
+  "clear BH q <= {params$fdr_alpha}"))
+```
+
+### Figure: functional investment vs. the environmental gradient
+
+Top row: every COG category's rank correlation with each retained variable, sorted by
+effect for temperature. Filled points clear BH; the three a priori categories are labelled
+and coloured. Bottom row: the a priori categories' rclr values against temperature, one
+panel each, so the reader sees the actual 13 points rather than only a coefficient.
+The scatter axes carry raw temperature (°C) for readability; the test is rank-based, so
+z-scoring the predictor does not change rho.
+
+```{r growth-cog-figure}
+#| fig-width: 10
+#| fig-height: 8
+#| warning: false
+select_color <- "#346D6E"   # _brand.yml deep-teal
+
+cog_order <- cog_gradient |>
+  filter(variable == "TEMP") |>
+  arrange(rho) |>
+  pull(cog)
+
+p_rho <- cog_gradient |>
+  mutate(cog = factor(cog, levels = cog_order),# Follow temp
+                variable = factor(variable, levels = env_keep)) |>
+  ggplot(aes(rho, cog)) +
+  geom_vline(xintercept = 0, linewidth = 0.3, color = "grey70") +
+  geom_segment(aes(x = 0, xend = rho, 
+                   yend = cog, color = select_color), 
+               linewidth = 0.4) +
+  geom_point(aes(color = select_color, shape = significant), size = 2.2) +
+  facet_wrap(~ variable, nrow = 1) +
+  scale_color_manual(values = c(`TRUE` = select_color, `FALSE` = "grey55"),
+                               labels = c(`TRUE` = "a priori (J/O/C)", `FALSE` = "context"),
+                               name = NULL) +
+  scale_shape_manual(values = c(`TRUE` = 19, `FALSE` = 21),
+                              labels = c(`TRUE` = glue::glue("BH q <= {params$fdr_alpha}"),
+                                         `FALSE` = "n.s."),
+                              name = NULL, drop = FALSE) +
+  labs(x = expression(Spearman~rho), y = "COG category",
+                title = "Functional category vs. environment, all 13 vent units") +
+  theme_bw(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+apriori_points <- tibble::as_tibble(cog_z[, COG_SELECT, drop = FALSE],
+                                    rownames = "unit") |>
+  tidyr::pivot_longer(all_of(COG_SELECT), names_to = "cog", values_to = "rclr") |>
+  left_join(select(env_vent, unit, field, TEMP), by = "unit") |>
+  left_join(cog_gradient |> filter(variable == "TEMP") |>
+                     select(cog, rho, q_bh), by = "cog") |>
+  mutate(panel = glue::glue(
+    "COG {cog}: {stringr::str_trunc(unname(COG_DESCRIPTIONS[cog]), 34)}\nrho = {round(rho, 2)}, q = {signif(q_bh, 2)}"))
+
+p_scatter <- ggplot(apriori_points, aes(TEMP, rclr)) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.4,
+                       color = select_color, formula = y ~ x) +
+  geom_point(aes(fill = field), shape = 21, size = 2.6,
+                      color = "grey20") +
+  facet_wrap(~ panel, nrow = 1, scales = "free_y") +
+  scale_fill_manual(values = color_field, name = NULL) +
+  labs(x = "Temperature (\u00b0C)", y = "rclr (category share)",
+                caption = paste("Line is a least-squares guide only; the test is the",
+                                "rank correlation above.")) +
+  theme_bw(base_size = 10) +
+  theme(panel.grid.minor = element_blank(),
+                 strip.text = element_text(size = 7.5))
+
+patchwork::wrap_plots(p_rho, p_scatter, ncol = 1, heights = c(1.3, 1))
+```
+
+## Tier 1b — KEGG categories
+Same design as Tier 1 with KEGG BRITE level-B categories in place of COG letters.
+
+* **Mapping.** KO to level-B category from `data/external/ko00001.keg`. The excluded top-level classes are set in `KEGG_EXCLUDE_A`; print `brite_map` to see exactly what remains.
+* **Multi-category KOs.** A KO placed in *n* distinct level-B categories splits its scaledTPM equally across them, the same mass-conserving rule used for multi-KO transcripts and multi-letter COG codes. A KO in two pathways of the *same* level-B category counts once there.
+* **Coverage.** KOs with no retained level-B category drop out, so the composition is over *mapped* expression only. The chunk prints the mapped share of vent TPM. Report it.
+* **Family for BH.** Category x variable tests within this tier are corrected as one family, separately from COG.
+
+
+```{r growth-kegg-map}
+#| message: true
+#| warning: false
+if (!file.exists(KEGG_BRITE_FILE)) {
+  stop("`", KEGG_BRITE_FILE, "` not found. Download the KEGG BRITE KO hierarchy once, e.g.\n",
+       "  curl -o ", KEGG_BRITE_FILE, " \"https://rest.kegg.jp/get/br:ko00001\"\n",
+       "then re-run.", call. = FALSE)
+}
+
+# >SKH: shared parser R/read_brite.R (same map 06 uses; replaces the inline copy, 2026-10-12)
+brite_map <- read_brite_level_b(KEGG_BRITE_FILE, exclude_a = KEGG_EXCLUDE_A) |>
+  select(ko_id, kegg_a, kegg, description, n_cat)
+
+# The a priori ids must exist in the file, and their names are printed so the id -> name match can be checked by eye.
+stopifnot(all(KEGG_SELECT %in% brite_map$kegg))
+brite_map |>
+  filter(kegg %in% KEGG_SELECT) |>
+  distinct(kegg, description) |>
+  print()
+
+message(glue::glue(
+  "{n_distinct(brite_map$ko_id)} KOs in {n_distinct(brite_map$kegg)} level-B categories | ",
+  "{n_distinct(brite_map$ko_id[brite_map$n_cat > 1])} KOs sit in more than one"))
+```
+
+Builds the units x KEGG-category matrix with the same unit averaging and rclr as the COG tier.
+
+```{r growth-kegg-matrix}
+#| message: true
+# Only the columns needed, before the many-to-many join, to keep memory down.
+kegg_split <- paired_mod |>
+  filter(vent_bin == "Vent") |>
+  transmute(unit = .data[[UNIT_COL]], n_reps, ko_id, scaledTPM,
+                   .txid = if (!is.na(TX_ID)) .data[[TX_ID]] else row_number()) |>
+  inner_join(brite_map, by = "ko_id", relationship = "many-to-many") |>
+  mutate(scaledTPM = scaledTPM / n_cat)
+
+# Mass conservation: splitting across categories must not create or lose TPM.
+vent_ko_tpm <- paired_mod |> filter(vent_bin == "Vent")
+mapped_tpm  <- sum(vent_ko_tpm$scaledTPM[vent_ko_tpm$ko_id %in% brite_map$ko_id])
+stopifnot(isTRUE(all.equal(sum(kegg_split$scaledTPM), mapped_tpm)))
+message(glue::glue(
+  "{round(100 * mapped_tpm / sum(vent_ko_tpm$scaledTPM), 1)}% of KO-annotated vent TPM ",
+  "maps to a retained KEGG level-B category"))
+
+kegg_mat <- kegg_split |>
+  summarise(tpm = sum(scaledTPM) / first(n_reps), .by = c(unit, n_reps, kegg)) |>
+  select(-n_reps) |>
+  tidyr::pivot_wider(names_from = kegg, values_from = tpm, values_fill = 0) |>
+  tibble::column_to_rownames("unit") |>
+  as.matrix()
+
+kegg_mat <- kegg_mat[env_model$unit, , drop = FALSE]
+kegg_z   <- rclr_transform(kegg_mat)
+
+# A priori categories must be present, or the prediction cannot be tested.
+KEGG_SELECT <- KEGG_SELECT[KEGG_SELECT %in% colnames(kegg_mat)]
+if (!length(KEGG_SELECT)) {
+  stop("None of the a priori KEGG categories are present in the vent data.", call. = FALSE)
+}
+
+kegg_support <- kegg_split |>
+  summarise(n_transcripts = n_distinct(.txid),
+                   n_kos = n_distinct(ko_id),
+                   total_tpm = sum(scaledTPM),
+                   .by = c(kegg, description)) |>
+  mutate(pct_tpm  = round(100 * total_tpm / sum(total_tpm), 2),
+                a_priori = kegg %in% KEGG_SELECT) |>
+  arrange(desc(total_tpm))
+
+message(glue::glue("{nrow(kegg_mat)} vent units x {ncol(kegg_mat)} KEGG categories | ",
+                   "a priori present: {paste(KEGG_SELECT, collapse = ', ')}"))
+kegg_support |>
+  select(kegg, description, a_priori, n_kos, n_transcripts, pct_tpm) |>
+  print(n = Inf)
+```
+
+```{r growth-kegg-corr}
+#| message: true
+set.seed(params$seed)
+
+kegg_gradient <- purrr::map_dfr(env_keep, \(v)
+  spearman_perm(kegg_z, env_model[[v]]) |>
+    mutate(variable = v, .before = 1)) |>
+  rename(kegg = feature) |>
+  # BH across this tier's whole family (every category x every variable)
+  mutate(q_bh = stats::p.adjust(p_perm, method = "BH")) |>
+  left_join(select(kegg_support, kegg, description, n_kos, n_transcripts,
+                                 pct_tpm, a_priori),
+                   by = "kegg") |>
+  mutate(direction   = if_else(rho < 0, "decreases", "increases"),
+                significant = q_bh <= params$fdr_alpha) |>
+  arrange(variable, rho)
+
+kegg_apriori_result <- kegg_gradient |>
+  filter(a_priori) |>
+  select(variable, kegg, description, n_kos, pct_tpm, rho, p_perm, q_bh, direction) |>
+  mutate(across(c(rho, p_perm, q_bh), \(x) round(x, 4))) |>
+  arrange(variable, kegg)
+
+kegg_apriori_result |> print(n = Inf)
+
+message(glue::glue(
+  "{sum(kegg_gradient$significant)} of {nrow(kegg_gradient)} category x variable tests ",
+  "clear BH q <= {params$fdr_alpha}"))
+```
+
+> **Read the three a priori rows against the prediction**, exactly as for COG: all three negative with temperature supports the slow-growth reading; fewer, or a negative rho that does not clear BH, is "consistent with, but not established by". Where COG and KEGG disagree on direction for the matching category (J vs Translation, O vs Folding/sorting/degradation, C vs Energy metabolism), report both.
+
+>SKH: assistant-added chunk (2026-10-05). Mirrors the COG figure; uses `select_color` defined there.
+
+```{r growth-kegg-figure}
+#| fig-width: 10
+#| fig-height: 8
+#| warning: false
+kegg_order <- kegg_gradient |>
+  filter(variable == "TEMP") |>
+  arrange(rho) |>
+  pull(description)
+
+p_rho_kegg <- kegg_gradient |>
+  mutate(description = factor(description, levels = kegg_order),
+                variable    = factor(variable, levels = env_keep)) |>
+  ggplot(aes(rho, description)) +
+  geom_vline(xintercept = 0, linewidth = 0.3, colour = "grey70") +
+  geom_segment(aes(x = 0, xend = rho, yend = description,
+                                     colour = a_priori), linewidth = 0.4) +
+  geom_point(aes(colour = a_priori, shape = significant), size = 2.2) +
+  facet_wrap(~ variable, nrow = 1) +
+  scale_colour_manual(values = c(`TRUE` = select_color, `FALSE` = "grey55"),
+                               labels = c(`TRUE` = "a priori", `FALSE` = "context"),
+                               name = NULL) +
+  scale_shape_manual(values = c(`TRUE` = 19, `FALSE` = 21),
+                              labels = c(`TRUE` = glue::glue("BH q <= {params$fdr_alpha}"),
+                                         `FALSE` = "n.s."),
+                              name = NULL, drop = FALSE) +
+  labs(x = expression(Spearman~rho), y = "KEGG BRITE category (level B)",
+                title = "KEGG category vs. environment, all 13 vent units") +
+  theme_bw(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+kegg_apriori_points <- tibble::as_tibble(kegg_z[, KEGG_SELECT, drop = FALSE],
+                                         rownames = "unit") |>
+  tidyr::pivot_longer(all_of(KEGG_SELECT), names_to = "kegg", values_to = "rclr") |>
+  left_join(select(env_vent, unit, field, TEMP), by = "unit") |>
+  left_join(kegg_gradient |> filter(variable == "TEMP") |>
+                     select(kegg, description, rho, q_bh), by = "kegg") |>
+  mutate(panel = glue::glue(
+    "{stringr::str_trunc(description, 34)}\nrho = {round(rho, 2)}, q = {signif(q_bh, 2)}"))
+
+p_scatter_kegg <- ggplot(kegg_apriori_points, aes(TEMP, rclr)) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.4,
+                       colour = select_color, formula = y ~ x) +
+  geom_point(aes(fill = field), shape = 21, size = 2.6,
+                      colour = "grey20") +
+  facet_wrap(~ panel, nrow = 1, scales = "free_y") +
+  scale_fill_manual(values = color_field, name = NULL) +
+  labs(x = "Temperature (°C)", y = "rclr (category share)",
+                caption = paste("Line is a least-squares guide only; the test is the",
+                                "rank correlation above.")) +
+  theme_bw(base_size = 10) +
+  theme(panel.grid.minor = element_blank(),
+                 strip.text = element_text(size = 7.5))
+
+patchwork::wrap_plots(p_rho_kegg, p_scatter_kegg, ncol = 1, heights = c(1.3, 1))
+```
+
+## Tier 2 — PFAM-matched panels (sensitivity)
+
+COG J mixes ribosomal proteins with the rest of the translation apparatus, so a decline in
+J is not by itself a ribosome result. These three panels are narrower. Membership is a
+regex match against `PFAMs`, which is why the matched names are printed: **audit that table
+before citing this tier.** A transcript matching two panels counts in both.
+
+Each panel is expressed as its **share of total KO-annotated vent expression** per unit
+rather than rclr, because three hand-picked panels do not form a composition. Spearman is
+rank-based, so a correlation on the share is identical to one on the log-ratio of panel to
+non-panel expression.
+
+```{r growth-pfam-audit}
+#| message: true
+if (!"PFAMs" %in% names(paired_mod)) {
+  stop("`PFAMs` is not in the annotation table; the sensitivity tier cannot run. ",
+       "Either carry the eggNOG PFAMs column through 02 or delete this tier.",
+       call. = FALSE)
+}
+
+# `.by` does not accept renaming, so the unit column is materialized once here.
+vent_pfam <- paired_mod |>
+  dplyr::filter(vent_bin == "Vent") |>
+  dplyr::mutate(unit  = .data[[UNIT_COL]],
+                .txid = if (!is.na(TX_ID)) .data[[TX_ID]] else dplyr::row_number())
+
+# Audit on the DISTINCT PFAM strings (a few thousand) rather than every transcript.
+pfam_audit <- vent_pfam |>
+  dplyr::distinct(PFAMs) |>
+  dplyr::filter(!is.na(PFAMs), !PFAMs %in% c("", "-")) |>
+  tidyr::separate_longer_delim(PFAMs, delim = ",") |>
+  dplyr::mutate(pfam = stringr::str_trim(PFAMs)) |>
+  dplyr::distinct(pfam) |>
+  tidyr::expand_grid(panel = names(PFAM_PANELS)) |>
+  dplyr::filter(stringr::str_detect(pfam, stringr::regex(PFAM_PANELS[panel],
+                                                         ignore_case = TRUE))) |>
+  dplyr::summarise(n_pfam = dplyr::n_distinct(pfam),
+                   pfams = paste(sort(unique(pfam)), collapse = ", "),
+                   .by = panel)
+
+pfam_audit |> dplyr::select(panel, n_pfam) |> print()
+purrr::pwalk(pfam_audit, \(panel, n_pfam, pfams)
+  message(glue::glue("\n{panel} ({n_pfam} PFAM families):\n  {stringr::str_trunc(pfams, 900)}")))
+```
+
+> **Audit gate.** If a panel caught an unrelated family, or caught almost nothing, fix the
+> regex in `PFAM_PANELS` or drop that panel. Do not report a panel whose match list you have
+> not read.
+
+```{r growth-pfam-corr}
+#| message: true
+set.seed(params$seed)
+
+unit_total <- vent_pfam |>
+  dplyr::summarise(total_tpm = sum(scaledTPM) / dplyr::first(n_reps),
+                   .by = c(unit, n_reps)) |>
+  dplyr::select(unit, total_tpm)
+
+panel_share <- purrr::imap_dfr(PFAM_PANELS, \(rx, panel_name)
+  vent_pfam |>
+    dplyr::filter(!is.na(PFAMs),
+                  stringr::str_detect(PFAMs, stringr::regex(rx, ignore_case = TRUE))) |>
+    dplyr::summarise(panel_tpm = sum(scaledTPM) / dplyr::first(n_reps),
+                     n_transcripts = dplyr::n_distinct(.txid),
+                     .by = c(unit, n_reps)) |>
+    dplyr::mutate(panel = panel_name) |>
+    dplyr::select(-n_reps)) |>
+  # Complete against EXPLICIT levels: a panel that matched nothing anywhere would
+  # otherwise vanish from the results instead of reporting a zero share.
+  tidyr::complete(unit = unit_total$unit, panel = names(PFAM_PANELS),
+                  fill = list(panel_tpm = 0, n_transcripts = 0)) |>
+  dplyr::left_join(unit_total, by = "unit") |>
+  dplyr::mutate(share = panel_tpm / total_tpm)
+
+share_mat <- panel_share |>
+  dplyr::select(unit, panel, share) |>
+  tidyr::pivot_wider(names_from = panel, values_from = share) |>
+  tibble::column_to_rownames("unit") |>
+  as.matrix()
+share_mat <- share_mat[env_model$unit, , drop = FALSE]
+
+panel_gradient <- purrr::map_dfr(env_keep, \(v)
+  spearman_perm(share_mat, env_model[[v]]) |>
+    dplyr::mutate(variable = v, .before = 1)) |>
+  dplyr::rename(panel = feature) |>
+  dplyr::mutate(q_bh = stats::p.adjust(p_perm, method = "BH"),
+                direction = dplyr::if_else(rho < 0, "decreases", "increases"),
+                significant = q_bh <= params$fdr_alpha) |>
+  dplyr::left_join(panel_share |>
+                     dplyr::summarise(n_transcripts = sum(n_transcripts),
+                                      mean_share = mean(share), .by = panel),
+                   by = "panel") |>
+  dplyr::mutate(dplyr::across(c(rho, p_perm, q_bh), \(x) round(x, 4)),
+                mean_share = round(mean_share, 4)) |>
+  dplyr::arrange(variable, rho)
+
+panel_gradient |>
+  dplyr::select(variable, panel, n_transcripts, mean_share, rho, p_perm, q_bh,
+                direction, significant) |>
+  print(n = Inf)
+```
+
+```{r growth-pfam-figure}
+#| fig-width: 9
+#| fig-height: 3.4
+#| warning: false
+panel_share |>
+  dplyr::left_join(dplyr::select(env_vent, unit, field, TEMP), by = "unit") |>
+  dplyr::left_join(panel_gradient |> dplyr::filter(variable == "TEMP") |>
+                     dplyr::select(panel, rho, q_bh), by = "panel") |>
+  dplyr::mutate(facet = glue::glue("{panel}\nrho = {rho}, q = {signif(q_bh, 2)}")) |>
+  ggplot2::ggplot(ggplot2::aes(TEMP, share)) +
+  ggplot2::geom_smooth(method = "lm", se = FALSE, linewidth = 0.4,
+                       colour = select_color, formula = y ~ x) +
+  ggplot2::geom_point(ggplot2::aes(fill = field), shape = 21, size = 2.6,
+                      colour = "grey20") +
+  ggplot2::facet_wrap(~ facet, nrow = 1, scales = "free_y") +
+  ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+  ggplot2::scale_fill_manual(values = color_field, name = NULL) +
+  ggplot2::labs(x = "Temperature (\u00b0C)",
+                y = "share of vent expression",
+                title = "Sensitivity tier: PFAM-matched growth machinery vs. temperature") +
+  ggplot2::theme_bw(base_size = 10) +
+  ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
+                 strip.text = ggplot2::element_text(size = 8))
+```
+
+```{r growth-write}
+readr::write_csv(cog_support,        "output-tables/05_cog_category_support.csv")
+readr::write_csv(cog_gradient,       "output-tables/05_cog_category_gradient.csv")
+readr::write_csv(cog_apriori_result, "output-tables/05_growth_apriori_cog.csv")
+readr::write_csv(kegg_support,       "output-tables/05_kegg_category_support.csv")
+readr::write_csv(kegg_gradient,      "output-tables/05_kegg_category_gradient.csv")
+readr::write_csv(kegg_apriori_result, "output-tables/05_growth_apriori_kegg.csv")
+readr::write_csv(panel_gradient,     "output-tables/05_growth_panel_pfam.csv")
+readr::write_csv(pfam_audit,         "output-tables/05_growth_panel_pfam_audit.csv")
+```

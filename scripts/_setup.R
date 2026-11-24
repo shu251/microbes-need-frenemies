@@ -27,6 +27,8 @@ if (!identical(normalizePath(getwd(), winslash = "/"),
   setwd(PROJ_ROOT)
   message("[_setup] working directory set to project root: ", PROJ_ROOT)
 }
+# keep later chunks at the root when knitr renders from scripts/ (knitr resets wd after each chunk)
+if (isTRUE(getOption("knitr.in.progress"))) knitr::opts_knit$set(root.dir = PROJ_ROOT)
 
 # --- packages -----------------------------------------------------------------
 suppressPackageStartupMessages({

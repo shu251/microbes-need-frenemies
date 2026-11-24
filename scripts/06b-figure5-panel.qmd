@@ -1,0 +1,288 @@
+---
+title: "06b — Figure 5: trophic-mode panel presence by lineage"
+author: "Hu Lab"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: show
+    df-print: paged
+---
+
+<!-- >SKH: 2026-11-16 standalone figure script. Reads 06 output tables only; changes nothing in 06. -->
+
+# Contents
+
+Figure 5 stacks two presence/absence panels that share **one taxon set in one column order**:
+
+* **5A** heterotrophy/phagotrophy features carried by at least 3 lineages (as `fig_pa_heterotrophy_split` in 06);
+* **5B** osmotrophy, symbiosis and parasitism features carried by at least 1 lineage (as `fig_pa_other`).
+
+The shared taxon set is the union of the taxa shown in either panel. A taxon with no features in a
+panel shows as white (absent) tiles: `06_panel_taxon_pa_matrix.csv` is a full taxon × feature
+cross join, so absence is an explicit row.
+
+Presence calls are the 06 rule (the 05 count rule, 2026-11-23): *present* = detected in ≥ 3 of 13
+vent or ≥ 3 of 6 non-vent samples, and ≥ 6 of 19 all samples (30%) for the all-samples call that
+selects Fig 5 rows; *below threshold* = detected in ≥ 1 sample but below that bar;
+*absent* = never detected. A feature in two trophic modes is drawn once, in its primary mode
+(the 06 `panel_plot` rule).
+
+Two alternative layouts follow the main figure:
+
+* **Alt 1, one tile per pair:** each taxon × feature tile gets a single colour for where it is
+  present (both habitats, vent only, non-vent only, detected below threshold, absent). Easier to
+  read than split triangles at journal size.
+* **Alt 2, subcategory roll-up:** rows are subcategories rather than features; each tile is the
+  number of features present, labelled "both / total". Much shorter figure; the feature-level
+  detail moves to a supplementary table.
+
+# Set up
+
+```{r setup}
+#| message: false
+#| warning: false
+source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R")
+```
+
+```{r params}
+PA_MATRIX   <- "output-tables/06_panel_taxon_pa_matrix.csv"  # from 06 (taxon x feature, every pair)
+PANEL_TABLE <- "output-tables/06_panel_habitat.csv"         # from 06 (feature labels, primary mode)
+SETS_TABLE   <- "data/gene-lists/trophic_gene_sets.csv"      # scripts/00_build_gene_sets.R
+EXPERIMENTAL <- "data/gene-lists/protist_phagotrophy_experimental.csv"
+
+FIG5_A_MODES <- "Heterotrophy/phagotrophy"
+FIG5_B_MODES <- c("Osmotrophy", "Symbiosis", "Parasitism")
+FIG5_A_MIN_TAXA <- 3   # 5A: features present (all samples) in >= 3 lineages, as in 06
+FIG5_B_MIN_TAXA <- 1   # 5B: every feature present in >= 1 lineage, as in 06
+
+# Figure 4 lineages, printed in bold on the x-axis so the two figures read together
+FIG4_TAXA <- c("Anaeramoeba", "Metamonada (unres.)", "Parablepharismea", "Dysnectes",
+               "Spirotrichea", "Florideophyceae", "Euglenozoa")
+
+pa_states <- c(present = "Present (>= 3 samples)",
+               below_threshold = "Detected, below threshold",
+               absent = "Not detected")
+panel_pal <- list(vent    = c(present = "#b74a70", below_threshold = "#ecd0db", absent = "white"),
+                  nonvent = c(present = "#346D6E", below_threshold = "#cfe2e2", absent = "white"))
+```
+
+```{r load}
+#| message: true
+panel_features <- read_csv(PANEL_TABLE, show_col_types = FALSE) |>
+  select(feature_id, primary_category, subcategory, gene_disp, feature_lab, shared)
+
+taxon_pa_matrix <- read_csv(PA_MATRIX, show_col_types = FALSE) |>
+  select(cur_group, cur_L4, taxon, feature_id, vent, nonvent, all_samples) |>
+  inner_join(panel_features, by = "feature_id")
+stopifnot(!anyNA(taxon_pa_matrix$primary_category))
+
+grp <- unique(taxon_pa_matrix$cur_group)
+grp_levels <- c(intersect(SUPERGROUP_0_ordering, grp), setdiff(grp, SUPERGROUP_0_ordering))
+
+message(glue("{n_distinct(taxon_pa_matrix$cur_L4)} lineages x {n_distinct(taxon_pa_matrix$feature_id)} features"))
+```
+
+```{r labels}
+# y-axis labels: trailing * = protist experimental phagotrophy gene; bold KO id = Burns et al.
+# 2018 family; dagger = feature also in another trophic mode (same convention as 06)
+burns_ids <- read_csv(SETS_TABLE, show_col_types = FALSE) |>
+  filter(set_source == "burns2018") |> distinct(ko_id) |> pull(ko_id)
+experimental_ids <- read_csv(EXPERIMENTAL, show_col_types = FALSE) |>
+  select(ko_id, pfam_acc) |>
+  pivot_longer(everything(), values_to = "id") |>
+  separate_longer_delim(id, ";") |>
+  mutate(id = str_squish(id)) |>
+  filter(!is.na(id), id != "") |>
+  distinct(id) |> pull(id)
+
+feature_label_fun <- function(x) {
+  hit <- panel_features[match(x, panel_features$feature_lab), ]
+  lapply(seq_along(x), \(i) {
+    gene <- hit$gene_disp[i]; id <- hit$feature_id[i]
+    star <- paste0(if (id %in% experimental_ids) "*" else "",
+                   if (isTRUE(hit$shared[i])) "†" else "")
+    if (id %in% burns_ids) bquote(paste(.(gene), " (", bold(.(id)), ")", .(star)))
+    else                   bquote(paste(.(gene), " (", .(id), ")", .(star)))
+  }) |> as.expression()
+}
+taxon_label_fun <- function(x) {
+  lapply(x, \(t) if (t %in% FIG4_TAXA) bquote(bold(.(t))) else t) |> as.expression()
+}
+pa_caption <- paste("* protist phagotrophy experimental gene; bold KO id = Burns et al. 2018 family;",
+                    "† also in another trophic mode; bold lineage = discussed with Figure 4")
+```
+
+# Shared taxon set
+
+```{r helpers}
+# features of the given modes, filtered to those present (all samples) in >= min_taxa lineages
+pa_frame <- function(modes, min_taxa) {
+  df <- taxon_pa_matrix |> filter(primary_category %in% modes)
+  kept <- df |>
+    filter(all_samples == "present") |>
+    distinct(feature_id, cur_L4) |>
+    count(feature_id) |>
+    filter(n >= min_taxa)
+  df |> filter(feature_id %in% kept$feature_id)
+}
+
+# lineages a frame would show on its own: >= 1 feature present in vent, non-vent or all samples
+pa_shown_taxa <- function(df) {
+  df |>
+    filter(vent == "present" | nonvent == "present" | all_samples == "present") |>
+    distinct(cur_L4) |> pull()
+}
+
+# restrict to the shared taxa and set factor orders for plotting
+pa_prepare <- function(df, taxa, taxon_levels) {
+  feature_order <- df |>
+    summarise(n = sum(all_samples == "present"), .by = feature_lab) |>
+    arrange(n) |> pull(feature_lab)
+  df |>
+    filter(cur_L4 %in% taxa) |>
+    mutate(cur_group   = factor(cur_group, levels = grp_levels),
+           taxon       = factor(taxon, levels = taxon_levels),
+           feature_lab = factor(feature_lab, levels = feature_order),
+           mode        = str_wrap(primary_category, 12),
+           subcategory = str_wrap(subcategory, 18))
+}
+```
+
+```{r shared-taxa}
+#| message: true
+fig5_a_df <- pa_frame(FIG5_A_MODES, FIG5_A_MIN_TAXA)
+fig5_b_df <- pa_frame(FIG5_B_MODES, FIG5_B_MIN_TAXA)
+
+taxa_a <- pa_shown_taxa(fig5_a_df)
+taxa_b <- pa_shown_taxa(fig5_b_df)
+fig5_taxa <- union(taxa_a, taxa_b)
+# Figure 4 lineages with no panel feature (e.g. Anaeramoeba, Dysnectes) are added as all-absent
+# columns so their absence is visible next to Figure 4; set FALSE to drop them
+INCLUDE_FIG4_TAXA <- TRUE
+if (INCLUDE_FIG4_TAXA) {
+  fig5_taxa <- union(fig5_taxa, taxon_pa_matrix |> filter(taxon %in% FIG4_TAXA) |>
+                                  distinct(cur_L4) |> pull())
+}
+
+# column order: most features present (all samples) across both panels first
+fig5_taxon_levels <- bind_rows(fig5_a_df, fig5_b_df) |>
+  filter(cur_L4 %in% fig5_taxa) |>
+  summarise(n = sum(all_samples == "present"), .by = taxon) |>
+  arrange(desc(n)) |> pull(taxon) |> unique()
+
+message(glue("Figure 5: {length(fig5_taxa)} lineages; {length(setdiff(fig5_taxa, taxa_a))} added to 5A ",
+             "and {length(setdiff(fig5_taxa, taxa_b))} added to 5B as all-absent columns"))
+
+fig5_a <- pa_prepare(fig5_a_df, fig5_taxa, fig5_taxon_levels)
+fig5_b <- pa_prepare(fig5_b_df, fig5_taxa, fig5_taxon_levels)
+```
+
+# Supplementary Figure 5: all lineages (split tiles, as in 06)
+
+Each tile is cut on the bottom-left to top-right diagonal: vent = top-left triangle, non-vent =
+bottom-right triangle.
+
+```{r plot-split}
+# Polygons sit on a discrete axis set by an invisible geom_tile(), so free facet scales still
+# collapse to the taxa/features in each facet; triangle coordinates use each tile's position
+# within its facet (rank among levels present there). Same code as 06 plot_taxon_pa(split_tiles).
+plot_pa_split <- function(df, base_size = 6, show_x = TRUE) {
+  split_pal <- c(setNames(panel_pal$vent,    paste0("vent.",    names(panel_pal$vent))),
+                 setNames(panel_pal$nonvent, paste0("nonvent.", names(panel_pal$nonvent))))
+  split_labs <- c(vent.present = "Vent: present", vent.below_threshold = "Vent: below threshold",
+                  vent.absent = "Vent: absent", nonvent.present = "Non-vent: present",
+                  nonvent.below_threshold = "Non-vent: below threshold",
+                  nonvent.absent = "Non-vent: absent")
+  df <- df |>
+    mutate(px = dense_rank(as.integer(taxon)),       .by = cur_group) |>
+    mutate(py = dense_rank(as.integer(feature_lab)), .by = c(mode, subcategory))
+  poly <- bind_rows(mutate(df, half = "vent",    state = as.character(vent)),
+                    mutate(df, half = "nonvent", state = as.character(nonvent))) |>
+    mutate(tile_id = row_number(), key = paste(half, state, sep = ".")) |>
+    cross_join(tibble(v = 1:3)) |>
+    mutate(ox = if_else(half == "vent", c(-.5, -.5, .5)[v], c(-.5, .5, .5)[v]),
+           oy = if_else(half == "vent", c(-.5, .5, .5)[v], c(-.5, -.5, .5)[v]),
+           x = px + ox, y = py + oy)
+
+  ggplot() +
+    geom_tile(data = df, aes(taxon, feature_lab), fill = NA, colour = NA) +
+    geom_polygon(data = poly, aes(x, y, group = tile_id, fill = key),
+                 color = "grey70", linewidth = 0.1) +
+    scale_fill_manual(values = split_pal, labels = split_labs, drop = FALSE, name = NULL) +
+    scale_x_discrete(labels = taxon_label_fun) +
+    scale_y_discrete(labels = feature_label_fun) +
+    facet_grid(mode + subcategory ~ cur_group, scales = "free", space = "free") +
+    labs(x = NULL, y = NULL) +
+    theme_minimal(base_size = base_size) +
+    theme(panel.grid = element_blank(),
+          legend.position = "bottom",
+          axis.text.y = element_text(color = "black"),
+          axis.text.x = if (show_x) element_text(angle = 90, hjust = 1, vjust = 0.5, color = "black")
+                        else element_blank(),
+          strip.text.x = element_text(angle = 90, hjust = 0, size = base_size - 1, color = "black"),
+          strip.text.y = element_text(angle = 0, hjust = 0, size = base_size - 1, color = "black"))
+}
+```
+
+```{r fig5}
+#| fig-width: 20
+#| fig-height: 11
+# x-axis labels on the bottom panel only; supergroup strips on both
+fig5 <- plot_pa_split(fig5_a, show_x = FALSE) / plot_pa_split(fig5_b) +
+  plot_layout(heights = c(n_distinct(fig5_a$feature_lab), n_distinct(fig5_b$feature_lab)),
+              guides = "collect") +
+  plot_annotation(tag_levels = "A", title = "Vent (top left) | Non-vent (bottom right)",
+                  caption = pa_caption) &
+  theme(legend.position = "bottom")
+fig5
+# ggsave("figures/06b-figS-fig5-all-lineages-taxon-pa.svg", fig5, width = 21, height = 12)
+```
+
+# Figure 5, main text (reduced lineage set)
+
+<!-- >SKH: 2026-11-21 main-text version. The full figure above (`fig5`) is the supplementary figure. -->
+
+The supplementary figure (`fig5` above) keeps every lineage. The main-text version drops the
+Opisthokonta, Archaeplastida and Alveolata-Unannotated supergroups, and any lineage with fewer than
+`MAIN_MIN_FEATURES` features present (vent or non-vent) across both panels. Figure 4 lineages are kept
+regardless of either rule (`MAIN_KEEP_FIG4`), so their absence stays visible and Florideophyceae stays in. Feature rows and column order are the
+same as the supplementary figure.
+
+```{r fig5-main-taxa}
+#| message: true
+MAIN_DROP_GROUPS  <- c("Opisthokonta", "Archaeplastida", "Alveolata-Unannotated")
+MAIN_MIN_FEATURES <- 2      # drop lineages with only 1 feature present
+MAIN_KEEP_FIG4    <- TRUE   # keep Figure 4 lineages regardless of group or MAIN_MIN_FEATURES
+
+main_taxon_counts <- bind_rows(fig5_a, fig5_b) |>
+  summarise(n_present = sum(vent == "present" | nonvent == "present"),
+            .by = c(cur_group, taxon))
+
+fig5_main_taxa <- main_taxon_counts |>
+  # >SKH: 2026-11-22 Figure 4 lineages bypass both the group drop and the minimum (keeps Florideophyceae)
+  filter((!cur_group %in% MAIN_DROP_GROUPS & n_present >= MAIN_MIN_FEATURES) |
+           (MAIN_KEEP_FIG4 & taxon %in% FIG4_TAXA)) |>
+  pull(taxon) |> as.character()
+
+message(glue("Main-text Figure 5: {length(fig5_main_taxa)} of {nrow(main_taxon_counts)} lineages"))
+
+fig5_main_a <- fig5_a |> filter(taxon %in% fig5_main_taxa) |> mutate(taxon = fct_drop(taxon))
+fig5_main_b <- fig5_b |> filter(taxon %in% fig5_main_taxa) |> mutate(taxon = fct_drop(taxon))
+```
+### Figure 5.
+
+```{r fig5-main}
+#| fig-width: 10
+#| fig-height: 10
+fig5_main <- plot_pa_split(fig5_main_a, show_x = FALSE) / plot_pa_split(fig5_main_b) +
+  plot_layout(heights = c(n_distinct(fig5_main_a$feature_lab), n_distinct(fig5_main_b$feature_lab)),
+              guides = "collect") +
+  plot_annotation(tag_levels = "A", title = "Vent (top left) | Non-vent (bottom right)",
+                  caption = pa_caption) &
+  theme(legend.position = "bottom")
+fig5_main
+# ggsave("figures/06b-fig5-main-panel-taxon-pa.svg", fig5_main, width = 10, height = 10)
+```
+

@@ -1,0 +1,506 @@
+---
+title: "Q1 — Does the environment structure taxonomy more than function?"
+subtitle: "Frenemies euk metaT"
+author: "Hu Lab"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    df-print: paged
+---
+
+# Set up
+
+Execute source file here. 
+
+```{r setup, message=FALSE, warning=FALSE}
+# locator scripts/ (interactive) or other
+source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R") 
+
+# R/load_long_annot()
+long <- load_long_annot()
+```
+
+## Inquiry ONE
+
+_Does the environment structure taxonomy more than function?_
+
+We've previously observed how taxonomic diversity is highly distinct between vent sites that are only meters apart, are vent sites that are oceans part. Here, we want to explore how taxonomy and function are selected for, and if there are any signals of unified expressed function across separate hydrothermal vent fields.
+
+Underlying issue: the resolution of taxonomic level chosen can greatly alter how we view functional redundancy and taxonomic variation.
+
+Another to view the comparison, is to understand how taxonomy and function are coupled (or decoupled?) with repect to the unique vent environment. Using what we have seen from prior work, only testing at one taxonomic level may not be advisable, so we can perform some analyses to all levels to compare their outputs. 
+
+The main terms I want to focus on first are individual vent sites and separate hydrothermal vent fields. When we have too few vent sites/samples, we will still run the analysis to look for trends, but with a caveat that the lack of samples biases the results. 
+
+### Prep input data frame
+
+Need to focus on 1 taxonomic level. Informed from `03_taxonomy_grain_ladder.qmd`, re-iterated here. Filter by TPM, remove NAs.
+
+Modify table for analysis
+```{r revise-table, message=TRUE}
+paired <- long |>
+  # filter TPM by min tpm (5), remove NAs
+  dplyr::filter(scaledTPM >= params$min_tpm,
+                !is.na(SUPERGROUP_PHYLUM_CLASS), # rm NAs
+                !is.na(ko_id), # rm NAs
+                ko_id != "-",
+                ko_id != "") |>
+  dplyr::mutate(.tx = dplyr::row_number()) #add numerics
+# head(paired)
+```
+
+Deal with transcrvipts with more than 1 KEGG ID. This is a QC check, 0 indicates all is fine moving forward. 
+```{r paired-table-2, message=TRUE}
+n_multi <- sum(stringr::str_detect(paired$ko_id, ",")); n_multi
+```
+
+```{r paired-table-3, message=TRUE}
+message(glue::glue("Multi-KO transcripts exploded: {n_multi} of {nrow(paired)} ",
+                   "({scales::percent(n_multi / nrow(paired), accuracy = 0.1)}); ",
+                   "TPM divided equally among a transcript's KOs."))
+# colnames(paired)
+paired <- paired |>
+  tidyr::separate_longer_delim(ko_id, delim = ",") |>
+  dplyr::mutate(ko_id = stringr::str_trim(ko_id)) |>
+  dplyr::filter(ko_id != "", ko_id != "-") |>
+  dplyr::group_by(.tx) |> #Check by numerics.
+  dplyr::mutate(scaledTPM = scaledTPM / dplyr::n()) |>
+  dplyr::ungroup() |>
+  dplyr::select(-".tx")
+# hist(paired$scaledTPM)
+```
+
+
+```{r paired-table-3-2, message=TRUE}
+# extract relevant metadata
+meta <- paired |>
+  dplyr::distinct(sample_id, sample_unit, field, vent_bin, n_reps) |>
+  dplyr::arrange(sample_id)
+
+# rows with a resolvable lineage — the constant transcript set for the grain sweep
+paired_lin <- paired |> dplyr::filter(!is.na(full_classification))
+
+max_depth  <- max(stringr::str_count(paired_lin$full_classification, ";") + 1L)
+# max_depth
+```
+
+## Compare across taxonomic resolution
+
+Four comparisons for different taxonomic resolutions (grains? taxonomy ladder?), that use `vent_bin` and `field`. To test field effect *within* vent and *within* non-vent. How taxa/function are selected among vent fields versus among backgroundwaters. **The non-vent samples are only ~7 libraries — underpowered; read it as suggestive only.** KO function is the reference each taxonomy curve is judged against.
+
+Input data needs to be CLR normalized (by row), therefore we need to re-build this each time it is subset for the different sample types. 
+
+```{r functions-taxonomy-ladder}
+#
+sub_dist <- function(d, ids){
+  M <- as.matrix(d)
+  stats::as.dist(M[ids, ids, drop = FALSE])
+  }
+
+# four contrasts at one matrix/grain, each with its dispersion check
+## See grain curve fxn in 03.
+contrasts_at <- function(dat, feat, matrix_label, grain_label) {
+  bm <- build_matrix(dat, feat, min_tpm = 0, transform = params$transform)
+  d  <- bm$dist
+  m  <- meta[match(labels(d), meta$sample_id), ]
+
+  ov <- run_permanova(d, m, permutations = params$permutations, seed = params$seed) |>
+    dplyr::filter(.data$term %in% c("vent_bin", "field"))
+  rows <- list(
+    tibble::tibble(contrast = "vent_bin (overall)",
+                   R2 = ov$R2[ov$term == "vent_bin"], p = ov$p[ov$term == "vent_bin"],
+                   dispersion_p = betadisper_check(d, m$vent_bin)$dispersion_p),
+    tibble::tibble(contrast = "field (overall)",
+                   R2 = ov$R2[ov$term == "field"], p = ov$p[ov$term == "field"],
+                   dispersion_p = betadisper_check(d, m$field)$dispersion_p)
+  )
+  for (vb in c("Vent", "Non-vent")) {
+    ids <- m$sample_id[m$vent_bin == vb]; fl <- m$field[m$vent_bin == vb]
+    if (length(ids) >= 6 && dplyr::n_distinct(fl) >= 2 && all(table(fl) >= 2)) {
+      ds <- sub_dist(d, ids); ms <- m[match(ids, m$sample_id), ]
+      r  <- run_permanova(ds, ms, formula_rhs = ~ field,
+                          permutations = params$permutations, seed = params$seed) |>
+        dplyr::filter(.data$term == "field")
+      rows[[length(rows) + 1]] <- tibble::tibble(
+        contrast = paste0("field | ", vb), R2 = r$R2[1], p = r$p[1],
+        dispersion_p = betadisper_check(ds, ms$field)$dispersion_p)
+    }
+  }
+  dplyr::bind_rows(rows) |>
+    dplyr::mutate(matrix = matrix_label, grain = grain_label,
+                  n_features = ncol(bm$mat), .before = 1)
+}
+```
+
+
+Loop over each taxonomic depth (n=7). Run the stats function at each of the taxonomic depths and compile outputs into a data frame. 
+
+```{r ladder-run, message=FALSE, warning=FALSE}
+tax_all <- purrr::map_dfr(2:max_depth, function(d) {
+  dd <- paired_lin |> dplyr::mutate(.tax = lineage_depth(full_classification, d))
+  tryCatch(contrasts_at(dd, ".tax", "taxonomy", d), error = function(e) NULL)
+})
+glimpse(tax_all)
+```
+
+
+```{r ladder-run-2, message=FALSE, warning=FALSE}
+fxn_all <- contrasts_at(paired_lin, "ko_id", "function", NA_integer_)
+# fxn_all
+contrast_curve <- dplyr::bind_rows(tax_all, fxn_all) |>
+  dplyr::arrange(contrast, matrix, grain)
+```
+
+
+```{r ladder-run-2, message=FALSE, warning=FALSE}
+contrast_curve
+# unique(contrast_curve$contrast)
+# write.csv(contrast_curve, file = "output-tables/taxonomy-level-comparison.csv")
+```
+
+PERMANOVA R^2 results, p, dispersion for the 4 contrasts and 6 taxonomic gains of interest. So Function as a whole, and then taxonomic 2-7 are the different levels. The overall is across diferent vent fields and then we have across fields non-vent and across fields within vents only and then also vent vs. non-vent overall. 
+
+> take home: when taxonomy is a little higher, we get more reliable dispersion values (higher values). Then when the R^2 value is higher, it means that the environment structures more of what is expressed - not taxonomy
+
+* term: predictor or factor
+* Df: degrees of freedome
+* R2 - fraction of aitchison variance that the term explains
+* F pseudo F stat - terms variance relative to residal variance. higher F means there is a stronger signal relative to noise
+* p: permutation p-value, fraction of tests that provided an F value that was at least the same as what is reported. 
+* dispersion_p; when this value is < 0.05, a significant R2 and p value cannot be interpreted reliably. 
+* example: When function term R2 values are higher, this *suggests* that the environment structures what is expressed more that who is present. 
+* Anderson 2001; Anderson & Walsh 2013, Ecological Monographs
+
+
+_Findings_ 
+
+* For the comparison between vent fields, it is mostly not significant. _field (overall) R2 values_ This is also consistent for function across vent fields. 
+
+* Background samples across vent fields was compared, but statistical power is weak (_dispersion value == 0.0013_).
+
+* Vent site comparison across different fields - nothing significant. This means hydrothermal vent field did not contribute to taxonomic or functional composition. 
+
+* Vent vs. non-vent - this is the strongest signal. With increasing taxonomic resolution, the R2 increases. R2 for function is also strong. Vent vs. non-vent is the main factor structuring dataset variability, for both taxonomy and function. This gets stronger with increasing taxonomic resolution (closer to species).
+
+
+## Plot comparisons across taxonomic levels
+
+```{r ladder-plot, fig.height=6, fig.width=9}
+lv <- c("vent_bin (overall)", "field (overall)", "field | Vent", "field | Non-vent")
+
+tax_all <- dplyr::mutate(tax_all, contrast = factor(contrast, levels = lv))
+fxn_ref <- fxn_all |> dplyr::mutate(contrast = factor(contrast, levels = lv))
+```
+
+
+```{r ladder-plot-2, fig.height=5, fig.width=4}
+tax_all |> ggplot(aes(x = grain, y = R2)) +
+  # Include function R2 value
+  geom_hline(data = fxn_ref, aes(yintercept = R2), linetype = 2, color = "black") +
+  geom_line(color = "#b74a70", linewidth = 1) +
+  # presence/absence 
+  geom_point(aes(fill = dispersion_p < 0.05), shape = 21, size = 2, color = "#b74a70") +
+  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), name = "PERMANOVA p < 0.05") +
+  scale_fill_manual(values = c(`TRUE` = "white", `FALSE` = "#b74a70"),
+                      name = "Dispersion", labels = c("Reliable", "Unreliable")) +
+  scale_x_continuous(breaks = 2:max_depth) +
+  facet_grid(rows = vars(contrast)) +
+  theme_classic() +
+  labs(x = "Taxonomic resolution (Number of ranks kept)", y = expression(R^2~"(marginal)"))
+```
+
+# Annotation quality vs grain (input to the level choice)
+
+Repeat exersice with level of annotation.
+
+```{r resolution-diagnostic, fig.height=3.6, fig.width=7}
+placeholder <- "Indeterminate|Unannotated|incertae|_X$|^SG_|^Eukaryote$"
+
+resolution_by_depth <- purrr::map_dfr(2:max_depth, function(d) {
+  dd <- paired_lin |>
+    dplyr::mutate(.tax = lineage_depth(full_classification, d),
+                  .last = stringr::str_trim(stringr::str_extract(.tax, "[^;]+$")),
+                  .res = !stringr::str_detect(.last, placeholder))
+  tibble::tibble(grain = d,
+    n_features = dplyr::n_distinct(dd$.tax),
+    n_prevalent = dplyr::n_distinct(prevalence_filter(dd, ".tax", 2)$.tax),
+    # USE SCALED TPM HERE!! this way it is not dependent n the features and prelvalence
+    resolved_frac_tpm = sum(dd$scaledTPM[dd$.res]) / sum(dd$scaledTPM))
+})
+```
+
+
+```{r resolution-diagnostic-2, fig.height=3.6, fig.width=7}
+resolution_by_depth
+# write.csv(resolution_by_depth, file = "output-tables/resolution-by-taxdepth.csv")
+```
+
+* n_features: total number of taxonomic bins at whatever depth (grain)
+* n_prevalent: how many of the bins that remain after abundance filter
+* resolved_frac_tpm: This is a TPM-weighted output, for the transcript counts in the dataset, what % of them is captured by the taxa that end up passing the prevalence filter?
+
+The increase at the grain 7 is due to the use of placeholder NAs and others before the transcript taxa assignment gets to species or approx species. 
+
+Moving forward, we want to ask some questions about taxonomic and functional structure with respect to transcripts per million (TPM).
+
+What fraction of the total TPM signal is informative at each taxonomic level?
+_As we go to higher taxonomic level, there are more reads that end up in the unannotated category_. 
+
+```{r}
+lineage_ranks <- paired_lin |>
+  dplyr::mutate(n_ranks = stringr::str_count(lineage_depth(full_classification, 99L), ";") + 1L)
+
+max_depth <- max(lineage_ranks$n_ranks)   # replaces the raw-token count
+
+resolution_reached <- purrr::map_dfr(2:max_depth, \(d) tibble::tibble(
+  grain            = d,
+  reached_frac_tpm = sum(lineage_ranks$scaledTPM[lineage_ranks$n_ranks >= d]) /
+                     sum(lineage_ranks$scaledTPM)
+))
+```
+
+
+
+
+```{r}
+last_at <- function(d) {
+  paired_lin |>
+    dplyr::mutate(
+      .tax  = lineage_depth(full_classification, d),
+      .last = stringr::str_trim(stringr::str_extract(.tax, "[^;]+$")),
+      .res  = !stringr::str_detect(.last, placeholder)
+    ) |>
+    dplyr::mutate(grain = d) |>
+    dplyr::distinct(.last, .res, grain)
+}
+
+unique_by_grain <- purrr::map_dfr(4:6, last_at)
+
+# counts: total unique labels vs. resolved (non-placeholder) unique labels, per grain
+unique_by_grain |>
+  dplyr::group_by(grain) |>
+  dplyr::summarise(
+    n_unique_total    = dplyr::n_distinct(.last),
+    n_unique_resolved = dplyr::n_distinct(.last[.res]),
+    n_unique_placeholder = n_unique_total - n_unique_resolved,
+    .groups = "drop"
+  )
+
+# which specific placeholder labels are showing up, and how often, per grain
+unique_by_grain |>
+  dplyr::filter(!.res) |>
+  dplyr::count(grain, .last, sort = TRUE)
+
+# labels that are resolved (real) at grain 4 but disappear/change by grain 5 or 6
+# i.e. grain 4's real name gets a placeholder child at deeper grain — a genuine resolution ceiling
+dplyr::anti_join(
+  dplyr::filter(unique_by_grain, grain == 4, .res),
+  dplyr::filter(unique_by_grain, grain == 5, .res),
+  by = ".last"
+)
+```
+Tables show me that the resolution of the `resolved_frac_tpm` decreases rapidly after 4. 
+
+Earlier PERMANOVAA signal was significant at both 4 and 5, but both were pretty similar for most of the comparisons. Dispersion was good too, so more evidence 4 is OK. 
+
+
+```{r resolution-diagnostic-3, fig.height=3, fig.width=5}
+ggplot(resolution_by_depth, aes(grain, resolved_frac_tpm)) +
+  geom_line(color = "#711518") + geom_point(size = 2, color = "#711518") +
+  geom_hline(yintercept = 0.75, linetype = 3) +
+  scale_x_continuous(breaks = 2:max_depth) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(x = "taxonomic depth (ranks kept)", y = "TPM-weighted % with a resolved name",
+       title = "Annotation quality vs grain", subtitle = "dotted = 75% resolved reference") +
+  theme_classic(base_size = 12)
+```
+
+> Use above table outputs and considerations to determine a chosen depth, assign `CHOSEN_DEPTH`.
+
+
+```{r choose-level}
+CHOSEN_DEPTH <- 4L
+```
+
+
+```{r choose-level-2}
+paired_q1 <- paired_lin |>
+  dplyr::mutate(.tax_q1 = lineage_depth(full_classification, CHOSEN_DEPTH))
+
+tax_feature <- ".tax_q1"
+
+message(glue::glue("Committed taxonomic grain: depth {CHOSEN_DEPTH} — ",
+                   "{dplyr::n_distinct(paired_q1$.tax_q1)} features; ",
+                   "resolved TPM {scales::percent(resolution_by_depth$resolved_frac_tpm[resolution_by_depth$grain == CHOSEN_DEPTH], 0.1)}."))
+```
+> Committed taxonomic grain: depth 4 — 223 features; resolved TPM 84.1%.
+
+
+## Use taxonomic level determined
+
+```{r committed-matrices}
+tax <- build_matrix(
+  paired_q1, 
+  tax_feature, 
+  min_tpm = 0, 
+  transform = params$transform)
+
+fxn <- build_matrix(
+  paired_q1, 
+  "ko_id",
+  min_tpm = 0,
+  transform = params$transform)
+
+# Llabel check
+stopifnot(identical(labels(tax$dist), labels(fxn$dist)))
+```
+
+```{r committed-partition}
+# all four contrasts, both matrices, at the committed grain — the headline table
+committed <- dplyr::bind_rows(
+  contrasts_at(paired_q1, tax_feature, "taxonomy", CHOSEN_DEPTH),
+  contrasts_at(paired_lin, "ko_id",    "function", NA_integer_)
+) |>
+  dplyr::select(matrix, contrast, R2, p, dispersion_p, n_features) |>
+  dplyr::arrange(contrast, matrix)
+
+committed
+```
+Table reporting level 4 signifiance across pairwise comparisons. 
+```{r save supplemental table}
+# write.csv(committed, file = "output-tables/tax-lev4-permanova.csv")
+```
+
+
+## Taxonomy and function based on same TPM output; use procrustes
+
+```{r procrustes}
+pt <- procrustes_test(tax$dist, fxn$dist, k = 2,
+                      permutations = params$permutations, seed = params$seed)
+
+c(procrustes_corr = pt$t0, p = pt$signif)
+```
+
+*Interpretation*: Procrustes correlation r = 0.62420 and p = 0.0002 indicates that the taxonomic and functional results correspond to one another more than expected due to chance.
+
+
+##dbRDA 
+
+(function ~ env | FINE taxonomy)
+
+Functional selection: Does the environment explain **function** after we stop considering taxonomy? 
+
+
+```{r}
+glimpse(paired_lin)
+```
+
+
+```{r partial-dbrda}
+tax_fine <- build_matrix(paired_lin, "full_classification", min_tpm = 0, transform = params$transform)
+
+fxn_d <- fxn$dist
+
+mfa <- meta[match(
+  labels(tax_fine$dist), 
+  meta$sample_id), ]
+
+stopifnot(identical(labels(tax_fine$dist), labels(fxn_d)))
+
+k_axes <- 4L  # drop to 3 if residual df is thin
+axes <- stats::cmdscale(tax_fine$dist, k = k_axes)
+colnames(axes) <- paste0("tax_pco_", seq_len(k_axes))
+env <- dplyr::bind_cols(mfa, as.data.frame(axes))
+```
+
+
+```{r partial-dbrda-db-build}
+db <- vegan::dbrda(
+  # formula = community data matrix (fxn_d) ~ constraints
+  ## For the constraints, using Vegans's "Condition" to assign covariables 
+  ## This means, that vent bin and vent field will be tested in this formula AFTER the taxonomy co-variables are considered that are inside "Condition"
+  fxn_d ~ vent_bin + field + Condition(tax_pco_1 + tax_pco_2 + tax_pco_3 + tax_pco_4),
+  data = env)
+```
+
+Analysis of variance for output
+```{r partial-dbrda-2}
+set.seed(params$seed)
+db_anova <- anova(db, by = "margin", permutations = params$permutations)
+db_anova
+```
+```{r}
+inertia_partition <- tibble::tibble(
+  component = c("conditioned (taxonomy)", "constrained (vent_bin + field)", "residual"),
+  inertia   = c(db$pCCA$tot.chi, db$CCA$tot.chi, db$CA$tot.chi)
+) |>
+  dplyr::mutate(prop_total = inertia / db$tot.chi)
+inertia_partition
+vegan::RsquareAdj(db)
+```
+
+WHen we look at the entire dbRDA model output, vent bin has a smaller contribution than taxonomy. Instead, field makes up more of the total variance. This means that once we consider how taxonomy influences vent vs. non-vent samples, the vent field explains a lot of our data. This means that function (Transcript profiles) contribute to vent field-wide comparisons. 
+```{r}
+summary(db_anova)
+```
+
+### Dispersion check for the partial dbRDA (taxonomy-conditioned function).
+```{r}
+# Sort taxa as variable
+db0 <- vegan::dbrda(
+  fxn_d ~ Condition(tax_pco_1 + tax_pco_2 + tax_pco_3 + tax_pco_4),
+  data = env
+)
+# use site scores 
+resid_scores <- vegan::scores(
+  db0, display = "sites", scaling = "sites",
+  choices = seq_len(db0$CA$rank))
+```
+
+```{r}
+d_fxn_resid <- stats::dist(resid_scores)
+ 
+# sanity check: residual distance matrix covers the same samples as fxn_d.
+stopifnot(nrow(resid_scores) == attr(fxn_d, "Size"))
+```
+
+```{r}
+# FIeld 
+disp_field <- betadisper_check(
+  d_fxn_resid, env$field,
+  permutations = params$permutations, seed = params$seed
+)
+
+# vent bin
+# PERMANOVA term gets a dispersion check, not just the significant ones.
+disp_vent_bin <- betadisper_check(
+  d_fxn_resid, env$vent_bin,
+  permutations = params$permutations, seed = params$seed
+)
+
+partial_dispersion <- dplyr::bind_rows(
+  field    = disp_field,
+  vent_bin = disp_vent_bin,
+  .id = "term"
+)
+
+
+partial_dispersion
+```
+```{r}
+output <- dplyr::bind_rows(
+  field    = betadisper_check(fxn_d, env$field,    permutations = params$permutations, seed = params$seed),
+  vent_bin = betadisper_check(fxn_d, env$vent_bin,  permutations = params$permutations, seed = params$seed),
+  .id = "term"
+)
+output
+```
+> By vent field: output from dispersion shows that the dbRDA with field as significance is true. 
+
+> By vent bin: dispersion got worse compared to above. This is becase we pieced apart of the taxonomic levels. 
+
+> When taxonomy is not considered ("taken out of equation") the vent field becomes a more noticeable factor. The vent bin signal is so strong, that is overshadows..?
+

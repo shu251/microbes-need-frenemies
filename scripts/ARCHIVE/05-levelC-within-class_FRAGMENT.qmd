@@ -1,0 +1,110 @@
+<!-- Paste into 05-vent-nonvent-signatures.qmd after the `class-kegg-enrichment` chunk.
+     Needs objects already built there: ko_hab, brite_map, class_levels, class_lab (05's own).
+     NOT YET RUN: no R reachable from this shell. Run interactively and check the stopifnot()s. -->
+
+## Finer grain: level-C pathways and individual KOs, within each of the five classes
+
+Two things at a finer grain than level B. They are not the same kind of claim:
+
+* **Level-C pathway enrichment.** The same Fisher test as the level-B chunk above, one grain
+  down, run **within each of the five classes** rather than the three collapsed groups. Only
+  classes with at least `MIN_CLASS_KOS` mapped KOs are tested; the rest are listed, not tested.
+* **Individual KOs.** Enrichment at the KO level is degenerate -- each KO sits in exactly one
+  habitat class by construction, so the 2x2 table is always `k = 1`. What is reportable at
+  this grain is descriptive: the highest-expressed KOs in each class, by name. That table is
+  the signature; it is not a test and carries no q value.
+
+```{r levelc-within-class}
+#| message: true
+MIN_CLASS_KOS <- 100   # mapped KOs needed before a class is tested at level C
+TOP_KO_N      <- 15    # KOs listed per class in the descriptive table
+
+brite_c <- read_brite_level_c()
+
+ko_class_c <- ko_hab |>
+  filter(habitat_class %in% class_levels) |>
+  transmute(ko_id, habitat_class = factor(as.character(habitat_class), levels = class_levels)) |>
+  inner_join(brite_c |> distinct(ko_id, pathway_id, pathway_name, b_description),
+             by = "ko_id", relationship = "many-to-many")
+
+class_n_c <- ko_class_c |> distinct(ko_id, habitat_class) |> count(habitat_class, name = "n_class")
+stopifnot(!anyDuplicated(distinct(ko_class_c, ko_id, habitat_class)$ko_id))  # one class per KO
+
+tested <- class_n_c |> filter(n_class >= MIN_CLASS_KOS) |> pull(habitat_class)
+message(glue("level-C tested in: {paste(tested, collapse = ', ')}; ",
+             "listed only: {paste(setdiff(class_levels, as.character(tested)), collapse = ', ')}"))
+class_n_c
+
+# background is every mapped, detected KO, as in the level-B chunk
+universe_c  <- sum(class_n_c$n_class)
+path_total  <- ko_class_c |> distinct(ko_id, pathway_id) |> count(pathway_id, name = "n_path_total")
+
+levelc_enrich <- ko_class_c |>
+  filter(habitat_class %in% tested) |>
+  count(habitat_class, b_description, pathway_id, pathway_name, name = "k") |>
+  complete(habitat_class = tested, nesting(b_description, pathway_id, pathway_name),
+           fill = list(k = 0L)) |>
+  left_join(class_n_c, by = "habitat_class") |>
+  left_join(path_total, by = "pathway_id") |>
+  mutate(N = universe_c,
+         expected    = n_class * n_path_total / N,
+         log2_enrich = log2((k + 0.5) / (expected + 0.5)),
+         p_fisher = purrr::pmap_dbl(list(k, n_class, n_path_total, N), \(k, n, K, N)
+           stats::fisher.test(matrix(c(k, n - k, K - k, N - n - (K - k)), nrow = 2))$p.value),
+         q_bh = p.adjust(p_fisher, method = "BH"),
+         sig  = q_bh <= 0.05)
+
+# how much power there was: pathways whose expected count never reaches 1 in a class
+levelc_enrich |>
+  summarise(n_pathways = n(), n_expected_lt1 = sum(expected < 1),
+            n_sig = sum(sig), .by = habitat_class)
+
+levelc_enrich |>
+  filter(sig) |>
+  arrange(habitat_class, q_bh) |>
+  select(habitat_class, b_description, pathway_name, k, expected, log2_enrich, q_bh) |>
+  mutate(across(where(is.double), \(x) signif(x, 3))) |>
+  print(n = Inf)
+
+write_csv(levelc_enrich, "output-tables/05_class_levelC_enrichment.csv")
+```
+
+> For results: which specific pathways carry the level-B signal, and in which of the five
+> classes. `n_expected_lt1` is the honest power statement: a pathway whose expected count is
+> below 1 cannot reach significance after BH no matter what it contains.
+
+```{r levelc-untested}
+#| message: true
+# the classes too small to test, listed in full at pathway grain
+ko_class_c |>
+  filter(!habitat_class %in% tested) |>
+  count(habitat_class, b_description, pathway_name, name = "n_ko", sort = TRUE) |>
+  print(n = Inf)
+```
+
+```{r top-kos-per-class}
+#| message: true
+# Descriptive signature at KEGG ID grain. No test: each KO is in one class by construction.
+top_kos <- ko_hab |>
+  filter(habitat_class %in% class_levels) |>
+  mutate(habitat_class = factor(as.character(habitat_class), levels = class_levels),
+         mean_share = if_else(str_starts(as.character(habitat_class), "vent"),
+                              mean_share_vent, mean_share_nonvent)) |>
+  left_join(brite_map |> summarise(ko_name = first(ko_name),
+                                   categories = paste(sort(unique(description)), collapse = "; "),
+                                   .by = ko_id), by = "ko_id") |>
+  slice_max(mean_share, n = TOP_KO_N, by = habitat_class) |>
+  arrange(habitat_class, desc(mean_share)) |>
+  transmute(habitat_class, ko_id, ko_name,
+            pct_of_unit_expression = round(100 * mean_share, 3),
+            occ_vent = round(occ_vent, 2), occ_nonvent = round(occ_nonvent, 2), categories)
+
+top_kos |> print(n = Inf)
+write_csv(top_kos, "output-tables/05_class_top_kos.csv")
+```
+
+> For results: the named genes behind each class. `mean_share` is taken in the class's own
+> habitat (vent share for the vent classes, non-vent share for shared and the non-vent
+> classes), so the column is "how much of a unit's expression this KO holds where the class
+> is defined", not a cross-habitat comparison. A KO with no `ko_name` is outside the curated
+> KEGG set.

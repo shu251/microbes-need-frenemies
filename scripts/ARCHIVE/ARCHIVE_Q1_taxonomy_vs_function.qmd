@@ -1,0 +1,258 @@
+---
+title: "Q1 — Does the environment structure taxonomy more than function?"
+subtitle: "Frenemies euk metaT · lead question · Pass 1 (all annotated transcripts), KO grain"
+author: "Hu Lab"
+date: last-modified
+format:
+  html:
+    toc: true
+    code-fold: show
+    df-print: paged
+---
+
+## Set up
+```{r setup, message=FALSE, warning=FALSE}
+source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R")  # locator: root (render) or scripts/ (interactive)
+long <- load_long_annot()   # 02 handoff + replicate-aware ids (see R/load_long_annot.R)
+```
+
+## The claim and the test
+
+Q1 asks whether the **environment** structures microeukaryote **taxonomy** more
+than **function** — functional convergence despite taxonomic divergence
+(Louca et al. 2016, *Science* 353:1272) versus function tracking taxonomy
+(Louca et al. 2018, *Nat. Ecol. Evol.* 2:936). One matrix cannot test this; we
+run the *same* variance partition on a taxonomy matrix and a function matrix and
+contrast the environmental terms, then confirm with a co-structure test. Because
+both matrices are built from the *same* `scaledTPM`, they are not independent —
+Procrustes and partial dbRDA are the honest arbiter, not the R² gap alone
+(Legendre, Fortin & Borcard 2015, *MEE* 6:1239).
+
+**Assumptions baked into this first run (each easy to change):**
+
+- **Environmental term: report both.** We fit `~ vent_bin + field` (marginal
+  terms) and report vent-vs-non-vent *and* among-field structure side by side —
+  no single headline term is privileged yet.
+- **Scope: Pass 1** — all annotated transcripts (the heterotrophy gene-set pass
+  comes next).
+- **Grain: KO** (the headline grain; the KO→module→pathway series is the next
+  step and needs a mapping table we have not built).
+- **Paired on the same molecules.** Both matrices are built from transcripts
+  that carry **both** a `SUPERGROUP_PHYLUM` and a KO, so taxonomy and function
+  describe the same transcript set.
+- **Multi-KO transcripts** are exploded to one KO per row with `scaledTPM`
+  divided equally among a transcript's KOs, so total expression is conserved
+  (a transcript contributes the same summed TPM whether it maps to 1 or 3 KOs).
+  The diagnostic below reports how many transcripts this affects.
+- **Replicates: individual.** Repeated vents enter as distinct `sample_id`s;
+  PERMANOVA and betadisper need that within-group replication to estimate
+  dispersion (Anderson & Walsh 2013, *Ecol. Monogr.* 83:557).
+- **Taxon-label permutation null: deferred** to the next iteration, once the
+  core numbers look right.
+
+## One paired table, two matrices
+
+```{r paired table, message=TRUE}
+# Isolate transcripts that have BOTH a taxon and KO
+# per-transcript scaledTPM before exploding (so the split can't push a real
+# transcript below the min-TPM floor).
+# head(long)
+paired <- long |>
+  dplyr::filter(.data$scaledTPM >= params$min_tpm,
+                !is.na(.data$SUPERGROUP_PHYLUM_CLASS),
+                !is.na(.data$ko_id), .data$ko_id != "-", .data$ko_id != "") |>
+  dplyr::mutate(.tx = dplyr::row_number())
+
+# How to handle multiple KO IDs assigned to transcripts
+n_multi <- sum(stringr::str_detect(paired$ko_id, ","))
+message(glue::glue(
+  "Multi-KO transcripts exploded: {n_multi} of {nrow(paired)} ",
+  "({scales::percent(n_multi / nrow(paired), accuracy = 0.1)}).  ",
+  "TPM is divided equally among a transcript's KOs (mass-conserving)."))
+
+# head(paired)
+
+# explode comma-joined ko_id -> one KO per row, dividing TPM by the KO count
+paired <- paired |>
+  tidyr::separate_longer_delim(ko_id, delim = ",") |>
+  dplyr::mutate(ko_id = stringr::str_trim(.data$ko_id)) |>
+  dplyr::filter(.data$ko_id != "", .data$ko_id != "-") |>
+  dplyr::group_by(.data$.tx) |>
+  dplyr::mutate(scaledTPM = .data$scaledTPM / dplyr::n()) |>
+  dplyr::ungroup() |>
+  dplyr::select(-".tx")
+
+# both matrices from the same table (min_tpm = 0: we already prefiltered above).
+# rows = individual libraries (aggregate = "none", the default).
+tax <- build_matrix(paired, "SUPERGROUP_PHYLUM_CLASS", min_tpm = 0, transform = params$transform)
+fxn <- build_matrix(paired, "ko_id",             min_tpm = 0, transform = params$transform)
+
+# design table from the long table's OWN distinct sample rows (never a
+# sample_meta match — the ids would not align; see R/load_long_annot.R).
+meta <- paired |>
+  dplyr::distinct(sample_id, sample_unit, field, vent_bin, n_reps) |>
+  dplyr::arrange(sample_id)
+
+meta <- meta[match(labels(tax$dist), meta$sample_id), ]
+
+# Check sample labels, colunm labels, etc.
+stopifnot(identical(labels(tax$dist), labels(fxn$dist)),
+          identical(meta$sample_id, labels(tax$dist)),
+          !anyNA(meta$vent_bin), !anyNA(meta$field))
+# meta
+# unique(long$SUPERGROUP_PHYLUM_CLASS)
+```
+
+## PERMANOVA
+
+```{r permanova}
+perm <- dplyr::bind_rows(
+  run_permanova(tax$dist, meta, permutations = params$permutations, seed = params$seed) |>
+    dplyr::mutate(matrix = "taxonomy"),
+  run_permanova(fxn$dist, meta, permutations = params$permutations, seed = params$seed) |>
+    dplyr::mutate(matrix = "function")
+) |>
+  dplyr::filter(.data$term %in% c("vent_bin", "field")) |>
+  dplyr::select(matrix, term, Df, R2, `F`, p)
+perm
+```
+* term: predictor or factor
+* Df: degrees of freedome
+* R2 - fraction of aitchison variance that the term explains
+* F pseudo F stat - terms variance relative to residal variance. higher F means there is a stronger signal relative to noise
+* p: permutation p-value, fraction of tests that provided an F value that was at least the same as what is reported. 
+
+> p-values are significant for all comparisons by vent vs. non-vent, but while taxonomy is not significant, function is.  The more interesting things is in the R2 values. Function term R2 values are higher, this *suggests* that the environment structures what's expressed more that who is present. 
+
+_Findings_ 
+* Vent vs. non-vent explains 27% of the taxonomic variation. The three fields explain LESS taxonomic variation than expected. 
+* A much stronger signal is vent vs. non-vent with respect to function. This explains 48% of the annotated data, which is a lot stronger. Vent field expressed profiles were also significantly different, but less strong than vent. vs non-vent. 
+* Functional selection by environment is stronger than selection of specific taxa. 
+
+## Dispersion — main-text caveat, not a footnote
+
+```{r betadisper}
+# PERMANOVA confounds location with dispersion, worst under this unbalanced
+# design (Anderson & Walsh 2013). Report it for BOTH grouping factors.
+dplyr::bind_rows(
+  betadisper_check(tax$dist, meta$vent_bin) |> dplyr::mutate(matrix = "taxonomy", grouping = "vent_bin"),
+  betadisper_check(fxn$dist, meta$vent_bin) |> dplyr::mutate(matrix = "function", grouping = "vent_bin"),
+  betadisper_check(tax$dist, meta$field)    |> dplyr::mutate(matrix = "taxonomy", grouping = "field"),
+  betadisper_check(fxn$dist, meta$field)    |> dplyr::mutate(matrix = "function", grouping = "field")
+) |>
+  dplyr::select(matrix, grouping, dispersion_p, note)
+```
+```{r}
+tax_fine  <- build_matrix(paired, "full_classification", min_tpm = 0, transform = params$transform)
+meta_fine <- meta[match(labels(tax_fine$dist), meta$sample_id), ]
+
+run_permanova(tax_fine$dist, meta_fine, permutations = params$permutations, seed = params$seed) |>
+  dplyr::filter(term %in% c("vent_bin", "field"))
+betadisper_check(tax_fine$dist, meta_fine$field)   # confirm field stays dispersion-clean
+```
+
+### Repeat PERMANOVA at different resolutions ("grains")
+
+```{r}
+# taxonomy grain ladder vs KO function — is the contrast stable across grain?
+feature_sets <- tibble::tribble(
+  ~matrix,    ~grain,   ~feature,
+  "taxonomy", "phylum", params$taxon_rank,        # SUPERGROUP_PHYLUM (coarse)
+  "taxonomy", "class",  params$taxon_rank_class,   # SUPERGROUP_PHYLUM_CLASS (mid)
+  "taxonomy", "full",   params$taxon_rank_fine,    # full_classification (fine)
+  "function", "KO",     "ko_id")                   # KO function, for reference
+
+feature_sets
+
+grain_series <- purrr::pmap_dfr(feature_sets, function(matrix, grain, feature) {
+  bm <- build_matrix(paired, feature, min_tpm = 0, transform = params$transform)
+  m  <- meta[match(labels(bm$dist), meta$sample_id), ]
+  perm <- run_permanova(bm$dist, m, permutations = params$permutations, seed = params$seed) |>
+    dplyr::filter(term %in% c("vent_bin", "field")) |>
+    dplyr::select(term, R2, p)
+  disp <- c(vent_bin = betadisper_check(bm$dist, m$vent_bin)$dispersion_p,
+            field    = betadisper_check(bm$dist, m$field)$dispersion_p)
+  perm |>
+    dplyr::mutate(matrix = matrix, grain = grain,
+                  n_features = ncol(bm$mat), dispersion_p = disp[term],
+                  .before = 1)
+}) |>
+  dplyr::arrange(term, matrix, grain)
+
+grain_series
+```
+
+
+
+## The difference, with uncertainty (bootstrap ΔR²)
+
+```{r bootstrap}
+# R2_env(taxonomy) - R2_env(function); a CI excluding 0 => that term structures
+# taxonomy more than function (convergence, Louca 2016). Run per term.
+# NOTE: with few non-vent libraries, some bootstrap resamples can miss a factor
+# level; those draws are dropped, so `boot_effective` < n_boot is expected.
+bd_vent  <- bootstrap_delta_r2(paired, meta, "SUPERGROUP_PHYLUM", "ko_id",
+                               n_boot = 499, term = "vent_bin",
+                               min_tpm = 0, transform = params$transform)
+bd_field <- bootstrap_delta_r2(paired, meta, "SUPERGROUP_PHYLUM", "ko_id",
+                               n_boot = 499, term = "field",
+                               min_tpm = 0, transform = params$transform)
+
+tibble::tibble(
+  term           = c("vent_bin", "field"),
+  boot_effective = c(length(bd_vent$delta), length(bd_field$delta)),
+  q2.5           = c(bd_vent$ci[[1]], bd_field$ci[[1]]),
+  q50            = c(bd_vent$ci[[2]], bd_field$ci[[2]]),
+  q97.5          = c(bd_vent$ci[[3]], bd_field$ci[[3]])
+)
+```
+
+## Co-structure — the honest arbiter
+
+```{r procrustes}
+pt <- procrustes_test(tax$dist, fxn$dist, k = 2,
+                      permutations = params$permutations, seed = params$seed)
+c(procrustes_corr = pt$t0, p = pt$signif)
+```
+
+```{r partial-dbrda}
+# does the environment explain FUNCTION after conditioning out taxonomy
+# structure? Condition on the first 3 taxonomy PCoA axes, test both env terms
+# marginally. n is small here (~20 libraries) — read df alongside the result.
+tax_axes <- stats::cmdscale(tax$dist, k = 3)
+colnames(tax_axes) <- paste0("TaxPCo", 1:3)
+env <- dplyr::bind_cols(meta, as.data.frame(tax_axes))
+
+db <- vegan::dbrda(fxn$dist ~ vent_bin + field + Condition(TaxPCo1 + TaxPCo2 + TaxPCo3),
+                   data = env)
+anova(db, by = "margin", permutations = params$permutations)
+```
+
+## Verification
+
+```{r qc}
+stopifnot(
+  nrow(meta) >= 15,
+  dplyr::n_distinct(meta$field) == 3,
+  dplyr::n_distinct(meta$vent_bin) == 2,
+  identical(labels(tax$dist), labels(fxn$dist)),
+  all(!is.na(perm$R2))
+)
+message(glue::glue(
+  "Q1 Pass 1 OK: {nrow(meta)} libraries, ",
+  "{ncol(tax$mat)} taxa x {ncol(fxn$mat)} KOs."))
+```
+
+## Reading the result
+
+- **Convergence (Louca 2016):** for a given term, R² is much larger on taxonomy
+  than function, the bootstrap ΔR² CI excludes 0, **and** that term's effect on
+  function is weak once taxonomy is conditioned out (partial dbRDA ns).
+- **Coupling (Louca 2018):** R² is similar on both matrices and Procrustes is
+  tight (high correlation, small *p*).
+- Read every term against its **dispersion** row above — a significant location
+  effect with heterogeneous dispersion is ambiguous (Anderson & Walsh 2013).
+- Because `vent_bin` and `field` are reported together, note where they diverge:
+  a strong `vent_bin` decoupling with weak `field` decoupling (or vice versa)
+  is itself a result about *which* environmental axis functions converge on.
+```

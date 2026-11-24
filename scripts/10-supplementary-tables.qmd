@@ -1,0 +1,498 @@
+---
+title: "10 — Supplementary tables S3–S9 for the Results"
+author: "Hu Lab"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: show
+    df-print: paged
+---
+
+<!-- >SKH: 2026-11-22 DRAFT, not in the repo yet, untested (no R where it was written).
+     Standalone: reads only output-tables/ CSVs written by 02-08 and changes nothing upstream.
+     Proposed location: scripts/10-supplementary-tables.qmd (not in the _quarto.yml render list). -->
+
+# What this script does
+
+The Results text cited about 33 output CSVs. This script gathers them into **seven
+supplementary tables** (Tables S3–S9) and one data file (Data S1), so the text can cite
+a table number instead of a CSV name. It does **no new statistics**. Every value is read
+from a table that an earlier script wrote. Only these operations happen here:
+
+* **rename** columns to manuscript wording
+* **join** tables that describe the same thing (one KEGG category, one lineage, one feature)
+* **stack** tables that share a layout, with a column naming the source
+* **sum** pair-level TPM into lineage-level expression shares (Table S6)
+
+Each table keeps a `source_table` column (or a note in its sheet), so any number in the
+manuscript can be traced back to the script that made it.
+
+| Table | Contents | Built from (script: output table) |
+|---|---|---|
+| S3 | Taxonomic rank choice and composition | 02: `02_grain_curve`, `02_resolution_by_depth`; 03: `03_taxa_vent_vs_nonvent_group`, `03_taxa_vent_vs_nonvent_L4` |
+| S4 | Community-level statistics, one row per test | 04: `04_env_effects`, `04_delta_r2`, `04_procrustes_habitat_check`, `04_q1_pcoa_envfit`, `04_q1_dbrda_summary`, `04_q1_dbrda_per_variable`, `04_q1_imputation_sensitivity` |
+| S5 | KEGG level-B categories | 05: `05_composition_kegg`, `05_kegg_by_habitat`, `05_class_kegg_enrichment` |
+| S6 | Lineages (class level) | 05b: `05b_lineage_repertoire`, `05b_taxon_ko_habitat`, `05b_carrier_summary`; 05: `05_composition_taxon` |
+| S7 | Robustness of the vent-only result | 08: `08_lineage_headline_sweep`, `08_field_drop_lineage`, `08_depth_matched_depths` |
+| S8 | Trophic-mode panel, one row per feature | 06: `06_panel_habitat`, `06_panel_feature_taxon_breadth`; 07: `07_panel_ko_delta` |
+| S9 | Trophic-mode panel by lineage | 06: `06_panel_taxon_mode_summary`, `06_panel_taxon_presence`, `06_panel_unit_summary` |
+| Data S1 | Every habitat-associated lineage-resolved KO | 05b: `05b_taxon_ko_habitat` |
+
+Outputs:
+
+* `output-tables/supplementary/Supplementary_Tables_S3-S9.xlsx`, with one sheet per table part
+  (S3a, S3b, …) and a `README` sheet
+* the same sheets as individual CSVs in `output-tables/supplementary/`, for anyone without Excel
+* `output-tables/supplementary/Data_S1_lineage_resolved_KOs.csv`
+
+**Run order.** Render after 02–08 are current:
+`quarto render scripts/10-supplementary-tables.qmd` from the repo root.
+
+# Set up
+
+```{r setup}
+#| message: false
+#| warning: false
+# locator: root (render) or scripts/ (interactive)
+source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R")
+
+# writexl writes .xlsx with no Java or system dependencies. It is not yet used elsewhere
+# in the repo: install once with install.packages("writexl").
+stopifnot("writexl is needed: install.packages('writexl')" = requireNamespace("writexl", quietly = TRUE))
+```
+
+```{r paths}
+IN_DIR  <- "output-tables"
+OUT_DIR <- file.path(IN_DIR, "supplementary")
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# read_out(): read one output table by its base name. If a table is missing, it fails and
+# names the script that writes it, so a stale or missing upstream render is obvious.
+read_out <- function(name) {
+  path <- file.path(IN_DIR, paste0(name, if (str_detect(name, "\\.csv")) "" else ".csv"))
+  if (!file.exists(path)) {
+    stop(glue("{path} not found: re-render script {str_extract(name, '^[0-9]+b?')} first"))
+  }
+  read_csv(path, show_col_types = FALSE)
+}
+```
+
+The date each input table was written. Check it before you submit: every table should
+come from the same round of renders.
+
+```{r input-dates}
+inputs <- c("02_grain_curve", "02_resolution_by_depth",
+            "03_taxa_vent_vs_nonvent_group", "03_taxa_vent_vs_nonvent_L4",
+            "04_env_effects", "04_delta_r2", "04_procrustes_habitat_check", "04_q1_pcoa_envfit",
+            "04_q1_dbrda_summary", "04_q1_dbrda_per_variable", "04_q1_imputation_sensitivity",
+            "05_composition_kegg", "05_kegg_by_habitat", "05_class_kegg_enrichment",
+            "05_composition_taxon",
+            "05b_lineage_repertoire", "05b_taxon_ko_habitat", "05b_carrier_summary",
+            "06_panel_habitat", "06_panel_feature_taxon_breadth", "06_panel_taxon_mode_summary",
+            "06_panel_taxon_presence", "06_panel_unit_summary",
+            "07_panel_ko_delta",
+            "08_lineage_headline_sweep", "08_field_drop_lineage", "08_depth_matched_depths")
+input_dates <- tibble(table = inputs,
+                      written = as.Date(file.mtime(file.path(IN_DIR, paste0(inputs, ".csv")))))
+input_dates
+```
+
+# Table S3: taxonomic rank choice and composition (scripts 02, 03)
+
+**S3a.** For each taxonomic rank ("grain"), the share of scaledTPM resolved to that rank,
+and how much taxonomic variation habitat and vent field explain (PERMANOVA). Results B
+cites these values for choosing rank 4. `matrix` is `taxonomy` (all taxa) or
+`taxonomy_prev` (after the ≥ 4-sample prevalence filter).
+
+```{r s3a}
+s3a <- read_out("02_grain_curve") |>
+  filter(matrix %in% c("taxonomy", "taxonomy_prev")) |>
+  left_join(read_out("02_resolution_by_depth") |> select(grain, resolved_frac_tpm),
+            by = "grain") |>
+  transmute(rank = grain,
+            matrix = recode(matrix, taxonomy = "All taxa",
+                            taxonomy_prev = "Prevalence filtered (>= 4 samples)"),
+            factor = recode(term, vent_bin = "Habitat (vent vs. non-vent)", field = "Vent field"),
+            n_taxa = n_features,
+            permanova_R2 = R2, permanova_p = p, permdisp_p = dispersion_p,
+            resolved_share_tpm = resolved_frac_tpm,
+            source_table = "02_grain_curve; 02_resolution_by_depth") |>
+  arrange(matrix, factor, rank)
+s3a
+```
+
+**S3b.** Mean (SD) share of scaledTPM per sample in vent and non-vent samples. The rows
+are supergroups, with dinoflagellates, ciliates and Syndiniales listed as separate groups
+(`level = "Group"`), and then class-level lineages (`level = "Class (rank 4)"`).
+Results B and Figure 1 use these values.
+
+```{r s3b}
+s3b <- bind_rows(
+  read_out("03_taxa_vent_vs_nonvent_group") |>
+    mutate(level = "Group", lineage = cur_group, source_table = "03_taxa_vent_vs_nonvent_group"),
+  read_out("03_taxa_vent_vs_nonvent_L4") |>
+    mutate(level = "Class (rank 4)", lineage = taxon_L4, source_table = "03_taxa_vent_vs_nonvent_L4")
+) |>
+  transmute(level, group = cur_group, lineage,
+            vent_mean_pct, vent_sd_pct, nonvent_mean_pct, nonvent_sd_pct, source_table) |>
+  arrange(level, desc(vent_mean_pct))
+s3b
+```
+
+# Table S4: community-level statistics (script 04)
+
+This is one long table with one row per test, so every statistic in Results C has a
+single place to cite. Every test reads into the same columns:
+
+* `test`: which analysis (PERMANOVA, PERMDISP, ΔR², Procrustes, envfit, dbRDA)
+* `matrix`: taxonomy or function
+* `factor`: the factor or environmental variable tested
+* `subset`: the samples used (all 19, or the 13 vent samples), plus any conditioning
+* `statistic`, `value`, `p`
+
+```{r s4}
+# PERMANOVA (R2, p) and PERMDISP (p) share one source row, so they are split into two rows
+env <- read_out("04_env_effects")
+s4_permanova <- bind_rows(
+  env |> transmute(test = "PERMANOVA", matrix, factor = contrast, subset = "All samples",
+                   statistic = "R2", value = R2, p, n = n_units),
+  env |> transmute(test = "PERMDISP", matrix, factor = contrast, subset = "All samples",
+                   statistic = "dispersion test", value = NA_real_, p = dispersion_p, n = n_units)
+) |> mutate(source_table = "04_env_effects")
+
+# Delta R2 = R2(taxonomy) - R2(function); jackknife 95% CI. A CI that spans 0 = not different.
+s4_delta <- read_out("04_delta_r2") |>
+  transmute(test = "Delta R2 (taxonomy - function)", matrix = "both",
+            factor = recode(term, vent_bin = "Habitat (vent vs. non-vent)", field = "Vent field"),
+            subset = glue("All samples; 95% jackknife CI {round(ci_low, 3)} to {round(ci_high, 3)}"),
+            statistic = "Delta R2", value = delta_observed, p = NA_real_, n = 19,
+            source_table = "04_delta_r2")
+
+# Procrustes: taxonomic vs. functional PCoA, on 2-4 axes, for all samples, vents only,
+# and with habitat means removed
+s4_procrustes <- read_out("04_procrustes_habitat_check") |>
+  transmute(test = "Procrustes", matrix = "taxonomy vs. function",
+            factor = glue("{k_axes} PCoA axes"), subset = test,
+            statistic = "r", value = procrustes_r, p, n = n_units,
+            source_table = "04_procrustes_habitat_check")
+
+# envfit: environmental vectors on the first two PCoA axes (vent samples).
+# p_free = unrestricted permutations; p_within_field = permutations within vent field
+s4_envfit <- read_out("04_q1_pcoa_envfit") |>
+  pivot_longer(c(p_free, p_within_field), names_to = "perm", values_to = "p") |>
+  transmute(test = "envfit", matrix = recode(level, ko = "function"), factor = variable,
+            subset = if_else(perm == "p_free", "Vent samples",
+                             "Vent samples; permutations within vent field"),
+            statistic = "r2", value = r2, p, n = 13, source_table = "04_q1_pcoa_envfit")
+
+# dbRDA, full model after VIF screening (CH4 removed as collinear) and forward selection
+s4_dbrda <- read_out("04_q1_dbrda_summary") |>
+  transmute(test = "dbRDA (full model)", matrix = recode(level, ko = "function"),
+            factor = glue("TEMP + pH + Mg; selected: {selected}"), subset = "Vent samples",
+            statistic = "adj. R2", value = full_adjR2, p = global_p, n = 13,
+            source_table = "04_q1_dbrda_summary")
+
+# dbRDA, one variable at a time: alone, and conditioned on vent field
+s4_dbrda_var <- read_out("04_q1_dbrda_per_variable") |>
+  pivot_longer(-c(level, variable), names_to = c(".value", "model"),
+               names_pattern = "(adjR2|p)_(alone|given_field)") |>
+  transmute(test = "dbRDA (single variable)", matrix = recode(level, ko = "function"),
+            factor = variable,
+            subset = if_else(model == "alone", "Vent samples", "Vent samples; conditioned on vent field"),
+            statistic = "adj. R2", value = adjR2, p, n = 13,
+            source_table = "04_q1_dbrda_per_variable")
+
+# Imputation check: single-variable dbRDA without the one sample (SirVentsAlot) whose pH
+# and CH4 were filled with the Gorda Ridge vent mean
+s4_impute <- read_out("04_q1_imputation_sensitivity") |>
+  transmute(test = "dbRDA (single variable)", matrix = recode(level, ko = "function"),
+            factor = variable, subset = "Vent samples, imputed sample removed",
+            statistic = "adj. R2", value = adjR2_alone_no_imputed, p = p_alone_no_imputed,
+            n = n_units, source_table = "04_q1_imputation_sensitivity")
+
+s4 <- bind_rows(s4_permanova, s4_delta, s4_procrustes, s4_envfit,
+                s4_dbrda, s4_dbrda_var, s4_impute) |>
+  mutate(across(c(factor, subset), as.character))
+s4
+```
+
+# Table S5: KEGG level-B categories (script 05)
+
+One row per KEGG level-B category. The Figure 3 numbers in Results D come from here:
+
+* **Cliff's δ** (vent vs. non-vent, 78 sample pairs) and its permutation tier.
+  `delta_tier` marks *, ** or *** for above the 50th, 75th or 95th percentile of the
+  permuted largest |δ|; only *** counts as significant.
+* **Mean share** of expression in vent and non-vent samples.
+* **Fisher enrichment** of each KO habitat class (vent-associated, shared, non-vent-associated)
+  in the category: observed KOs `k_*`, expected `exp_*` and BH-adjusted `q_*`.
+
+```{r s5}
+enrich_wide <- read_out("05_class_kegg_enrichment") |>
+  mutate(class = recode(class_group, "Vent-associated" = "vent", "Shared" = "shared",
+                        "Non-vent-associated" = "nonvent")) |>
+  select(description, class, k, expected, q_bh) |>
+  pivot_wider(names_from = class, values_from = c(k, expected, q_bh),
+              names_glue = "{.value}_{class}") |>
+  rename_with(\(x) str_replace(x, "^expected_", "exp_"), starts_with("expected_")) |>
+  rename_with(\(x) str_replace(x, "^q_bh_", "q_"), starts_with("q_bh_"))
+
+s5 <- read_out("05_composition_kegg") |>
+  left_join(read_out("05_kegg_by_habitat"), by = "description") |>
+  left_join(enrich_wide, by = "description") |>
+  transmute(kegg_level_A = a_description, kegg_level_B = description,
+            cliffs_delta, delta_tier = replace_na(delta_stars, ""),
+            significant, perm95_threshold,
+            mean_share_vent = `mean_share_Vent`, mean_share_nonvent = `mean_share_Non-vent`,
+            pick(starts_with("k_"), starts_with("exp_"), starts_with("q_"))) |>
+  arrange(desc(cliffs_delta))
+s5
+```
+
+Figure 3B uses the KO class totals. They are a footnote to S5, not a separate table.
+
+```{r s5-footnote}
+s5_ko_classes <- read_out("05_ko_habitat_class") |> count(habitat_class, name = "n_KOs")
+s5_ko_classes
+```
+
+# Table S6: lineages (scripts 05b, 05)
+
+**S6a.** One row per class-level lineage that has at least one habitat-associated
+lineage-resolved KO. Results E and Figure 4 come from here:
+
+* counts of the lineage's KOs in each habitat class (`n_vent_only` … `n_nonvent_only`)
+* `frac_vent_or_shared` (Figure 4A): the share of its KOs that are vent-only, vent-skewed or
+  shared. Lineages with < 15 KOs are flagged in `below_15_KOs`.
+* `share_of_vent_only_expr`: its share of all vent-only KO expression (summed TPM in vent
+  samples, Figure 4B). `share_of_nonvent_only_expr` is the same for non-vent-only KOs at
+  non-vent sites (Figure 4C).
+* `lineage_habitat` ("shared" = detected in ≥ 3 samples in each habitat) and the
+  taxon-level Cliff's δ on mean share, from 05
+
+```{r s6a}
+pairs <- read_out("05b_taxon_ko_habitat")
+
+# expression shares: sum each lineage's pair TPM within a pair class, divided by the class total
+expr_share <- function(cls, tpm_col) {
+  pairs |>
+    filter(habitat_class == cls) |>
+    summarise(tpm = sum({{ tpm_col }}), .by = cur_L4) |>
+    mutate(share = tpm / sum(tpm)) |>
+    select(cur_L4, share)
+}
+
+s6a <- read_out("05b_lineage_repertoire") |>
+  left_join(expr_share("vent_only", tpm_vent) |> rename(share_of_vent_only_expr = share),
+            by = "cur_L4") |>
+  left_join(expr_share("nonvent_only", tpm_nonvent) |> rename(share_of_nonvent_only_expr = share),
+            by = "cur_L4") |>
+  left_join(read_out("05_composition_taxon") |>
+              select(cur_L4, taxon_cliffs_delta = cliffs_delta, taxon_delta_significant = significant),
+            by = "cur_L4") |>
+  transmute(group = cur_group, lineage = taxon, lineage_habitat = taxon_habitat,
+            n_KOs = n_ko, n_vent_only = vent_only, n_vent_skewed = vent_skewed, n_shared = shared,
+            n_nonvent_skewed = nonvent_skewed, n_nonvent_only = nonvent_only,
+            frac_vent_or_shared = frac_vent_only + frac_vent_skewed + frac_shared,
+            below_15_KOs = n_ko < 15,
+            share_of_vent_only_expr = replace_na(share_of_vent_only_expr, 0),
+            share_of_nonvent_only_expr = replace_na(share_of_nonvent_only_expr, 0),
+            mean_share_vent, mean_share_nonvent, taxon_cliffs_delta, taxon_delta_significant) |>
+  arrange(desc(share_of_vent_only_expr))
+s6a
+```
+
+**S6b.** Who carries the habitat-only KOs: vent-only and non-vent-only lineage-resolved KOs,
+split by the lineage's own habitat class. `frac_KOs` is the share of lineage-resolved KOs
+and `share_expr` the share of expression. These are the 94% and 95.6% values in Results E.
+
+```{r s6b}
+s6b <- read_out("05b_carrier_summary") |>
+  transmute(panel, lineage_habitat = taxon_habitat, n_KOs = n_ko, frac_KOs = frac_ko,
+            share_expr = share, n_lineages = n_taxa)
+s6b
+```
+
+# Table S7: robustness of the vent-only result (script 08)
+
+This table goes with Supplementary Text S1.
+
+* **S7a.** For each depth scheme (`none` = no subsampling; `nonvent_to_vent` = non-vent
+  samples subsampled to vent depths; `common_vent_median`; `common_min` = every sample cut to
+  the shallowest) and each occupancy rule: the number of vent-only lineage-resolved KOs, how
+  many of the 103 from 05b are kept, and the share carried by lineages present in both
+  habitats. Values are medians with 95% ranges over 100 draws.
+* **S7b.** The same, leaving out one vent field at a time (no subsampling).
+* **S7c.** Median sequencing depth and number of KOs detected per sample under each scheme.
+
+```{r s7}
+s7a <- read_out("08_lineage_headline_sweep") |>
+  transmute(depth_scheme = scheme, occupancy_rule = rule,
+            n_vent_only = n_vent_only_med, n_vent_only_lo, n_vent_only_hi,
+            n_kept_of_103 = n_kept_from_05b_med, n_kept_lo = n_kept_from_05b_lo,
+            n_kept_hi = n_kept_from_05b_hi,
+            frac_on_lineages_in_both = frac_on_shared_lineages_med,
+            frac_lo = frac_on_shared_lineages_lo, frac_hi = frac_on_shared_lineages_hi)
+s7b <- read_out("08_field_drop_lineage") |>
+  transmute(field_left_out = dropped, n_vent_samples = n_vent_units, occupancy_rule = rule,
+            n_vent_only, n_kept_of_103 = n_kept_from_05b,
+            frac_on_lineages_in_both = frac_on_shared_lineages,
+            expr_on_lineages_in_both = expr_on_shared_lineages)
+s7c <- read_out("08_depth_matched_depths") |>
+  rename(depth_scheme = scheme, habitat = vent_bin)
+s7a
+```
+
+# Table S8: trophic-mode panel, one row per feature (scripts 06, 07)
+
+This is the Table S_panel. Results F and Figure S7 come from here, and these values can be
+read off it directly instead of citing separate tables:
+
+* **Mode counts** (261 heterotrophy, 57 symbiosis, ...): count rows by `mode`. A feature
+  with two modes (for example "Heterotrophy/phagotrophy | Symbiosis") counts in both.
+* **Habitat classes** (97 shared, 115 non-vent-associated, SecY vent-skewed): count by
+  `habitat_class`.
+* **Subcategory counts** (digestive hydrolases, 42 of 56 shared): count by `subcategory`.
+* **Breadth** (tubulin in 28 lineages): `n_lineages_present`, the number of lineages where
+  the feature is called present across all samples, as in Figure 5.
+* **Cliff's δ** (Figure S7): `cliffs_delta_vent`, reported only for KOs in the ranked
+  vent-associated set (`in_ranked_set`). It is descriptive: 07 applies no permutation threshold.
+
+```{r s8}
+s8 <- read_out("06_panel_habitat") |>
+  left_join(read_out("06_panel_feature_taxon_breadth") |>
+              select(feature_id, n_lineages_present = n_taxa_all,
+                     n_lineages_detected_any = n_taxa_any_det, n_groups_present = n_groups_all),
+            by = "feature_id") |>
+  left_join(read_out("07_panel_ko_delta") |>
+              select(feature_id, delta_vent, in_ranked_universe),
+            by = "feature_id") |>
+  transmute(feature_id, match_type, gene = gene_disp, mode = category,
+            primary_mode = primary_category, subcategory,
+            habitat_class, n_vent_samples_detected = n_det_vent,
+            n_nonvent_samples_detected = n_det_nonvent,
+            n_lineages_present, n_lineages_detected_any, n_groups_present,
+            in_ranked_set = replace_na(in_ranked_universe, FALSE),
+            # delta only where the KO is in the ranked universe (see 07: outside it, delta > 0
+            # can be an rCLR zero artefact)
+            cliffs_delta_vent = if_else(in_ranked_set, delta_vent, NA_real_)) |>
+  arrange(primary_mode, subcategory, gene)
+s8
+```
+
+# Table S9: trophic-mode panel by lineage (script 06)
+
+* **S9a.** For each lineage and mode, the number of panel features present only at non-vent
+  sites, in both habitats, or only at vents (Figure 5; Results F lineage counts).
+* **S9b.** The vent-only lineage × feature pairs (10 pairs; CTS-CP and CTSB share K01363, so
+  they appear as two rows) and whether each is visible in the main or supplementary Figure 5.
+* **S9c.** Per sample: the number of panel features detected and their share of all KOs
+  detected in that sample (the 11.4% vs. 6.1% in Results F).
+
+```{r s9}
+s9a <- read_out("06_panel_taxon_mode_summary") |>
+  transmute(group = cur_group, lineage = taxon, mode = category,
+            n_nonvent_only = nonvent_only, n_both = both, n_vent_only = vent_only,
+            n_features = n_features) |>
+  arrange(mode, desc(n_features))
+
+s9b <- read_out("06_panel_taxon_presence") |>
+  filter(presence == "vent_only") |>
+  transmute(group = cur_group, lineage = taxon, feature_id, gene, mode = category, subcategory,
+            n_vent_samples_detected = n_det_vent)
+
+s9c <- read_out("06_panel_unit_summary") |>
+  transmute(sample = unit, habitat = vent_bin, field, mode = category,
+            n_panel_features_detected = n_panel_detected, n_KOs_detected = n_ko_detected,
+            panel_share_of_detected_KOs = frac_of_detected_kos)
+s9b
+```
+
+# Data S1: all habitat-associated lineage-resolved KOs (script 05b)
+
+This is too long for a numbered table: it has one row per lineage × KO, with habitat class,
+detection counts and TPM. It is written as a plain CSV.
+
+```{r data-s1}
+data_s1 <- pairs |>
+  transmute(group = cur_group, lineage = taxon, ko_id,
+            lineage_resolved_class = habitat_class, community_ko_class = ko_habitat,
+            lineage_habitat = taxon_habitat, n_vent_samples_detected = n_det_vent,
+            n_nonvent_samples_detected = n_det_nonvent, occ_vent, occ_nonvent,
+            mean_share_vent, mean_share_nonvent, tpm_vent, tpm_nonvent)
+```
+
+# Write
+
+A `README` sheet lists every sheet with a one-line description and its source tables, so
+the workbook explains itself without this script.
+
+```{r write}
+sheets <- list(S3a = s3a, S3b = s3b, S4 = s4, S5 = s5, S5_ko_classes = s5_ko_classes,
+               S6a = s6a, S6b = s6b, S7a = s7a, S7b = s7b, S7c = s7c,
+               S8 = s8, S9a = s9a, S9b = s9b, S9c = s9c)
+
+readme <- tribble(
+  ~sheet, ~description, ~source,
+  "S3a", "PERMANOVA R2 and resolved share of expression per taxonomic rank", "02_grain_curve; 02_resolution_by_depth",
+  "S3b", "Mean share of expression per group and class lineage, vent vs. non-vent", "03_taxa_vent_vs_nonvent_group; 03_taxa_vent_vs_nonvent_L4",
+  "S4", "Community-level tests: PERMANOVA, PERMDISP, Delta R2, Procrustes, envfit, dbRDA", "04_* (see source_table column)",
+  "S5", "KEGG level-B categories: Cliff's delta, mean share, Fisher enrichment by KO class", "05_composition_kegg; 05_kegg_by_habitat; 05_class_kegg_enrichment",
+  "S5_ko_classes", "Number of KOs per habitat class (Figure 3B)", "05_ko_habitat_class",
+  "S6a", "Lineages: KOs per habitat class, vent-only and non-vent-only expression shares, taxon delta", "05b_lineage_repertoire; 05b_taxon_ko_habitat; 05_composition_taxon",
+  "S6b", "Carriers of vent-only and non-vent-only lineage-resolved KOs", "05b_carrier_summary",
+  "S7a", "Vent-only lineage-resolved KOs across depth schemes and occupancy rules", "08_lineage_headline_sweep",
+  "S7b", "Vent-only lineage-resolved KOs leaving out one vent field", "08_field_drop_lineage",
+  "S7c", "Median sequencing depth and KOs detected per depth scheme", "08_depth_matched_depths",
+  "S8", "Trophic-mode panel: one row per feature, habitat class, breadth, Cliff's delta", "06_panel_habitat; 06_panel_feature_taxon_breadth; 07_panel_ko_delta",
+  "S9a", "Panel features per lineage and mode by where present", "06_panel_taxon_mode_summary",
+  "S9b", "Vent-only lineage x feature pairs", "06_panel_taxon_presence",
+  "S9c", "Panel features per sample and share of detected KOs", "06_panel_unit_summary"
+) |>
+  # one date for the workbook: the newest input table, so a reader can see how current it is
+  mutate(newest_input_written = max(input_dates$written))
+stopifnot(setequal(readme$sheet, names(sheets)))   # README covers every sheet, no extras
+
+writexl::write_xlsx(c(list(README = readme), sheets),
+                    file.path(OUT_DIR, "Supplementary_Tables_S3-S9.xlsx"))
+iwalk(sheets, \(df, nm) write_csv(df, file.path(OUT_DIR, glue("Table_{nm}.csv"))))
+write_csv(data_s1, file.path(OUT_DIR, "Data_S1_lineage_resolved_KOs.csv"))
+message(glue("Wrote {length(sheets)} sheets + README to {OUT_DIR}/Supplementary_Tables_S3-S9.xlsx"))
+```
+
+# QC
+
+These checks reproduce the values the Results text cites from each table. If one fails, an
+upstream table has changed, and the text needs re-checking against it.
+
+```{r qc}
+near2 <- \(x, y, tol = 0.002) isTRUE(abs(x - y) < tol)
+stopifnot(
+  # S3: rank 4 resolves 82% of expression; 231 taxa after the prevalence filter
+  near2(s3a$resolved_share_tpm[s3a$rank == 4][1], 0.82, 0.01),
+  any(s3a$n_taxa == 231 & s3a$rank == 4),
+  # S4: habitat PERMANOVA R2 = 0.124 (taxonomy) and 0.120 (function)
+  near2(s4$value[s4$test == "PERMANOVA" & s4$matrix == "taxonomy" & s4$factor == "Vent vs. non-vent"], 0.124),
+  near2(s4$value[s4$test == "PERMANOVA" & s4$matrix == "function" & s4$factor == "Vent vs. non-vent"], 0.120),
+  # S5: translation is the only significant category (delta = 0.85)
+  sum(s5$significant) == 1, s5$kegg_level_B[s5$significant] == "Translation",
+  # S5 footnote: 31 vent-only and 814 shared KOs
+  s5_ko_classes$n_KOs[s5_ko_classes$habitat_class == "vent_only"] == 31,
+  s5_ko_classes$n_KOs[s5_ko_classes$habitat_class == "shared"] == 814,
+  # S6: 59 lineages with >= 15 KOs; vent-only expression shares sum to 1
+  sum(!s6a$below_15_KOs) == 59,
+  near2(sum(s6a$share_of_vent_only_expr), 1, 1e-6),
+  near2(sum(s6a$share_of_nonvent_only_expr), 1, 1e-6),
+  # S6b: 97 of 103 vent-only lineage-resolved KOs on lineages present in both habitats
+  s6b$n_KOs[str_detect(s6b$panel, "^Vent-only") & s6b$lineage_habitat == "shared"] == 97,
+  # S8: one row per feature (320), 97 shared heterotrophy features, SecY vent-skewed
+  nrow(s8) == 320, !anyDuplicated(s8$feature_id),
+  sum(s8$primary_mode == "Heterotrophy/phagotrophy" & s8$habitat_class == "shared") == 97,
+  s8$habitat_class[s8$feature_id == "K03076"] == "vent_skewed",
+  sum(s8$in_ranked_set) == 110,
+  # S9b: 10 distinct vent-only lineage x feature pairs
+  nrow(distinct(s9b, lineage, feature_id)) == 10
+)
+```

@@ -1,17 +1,20 @@
 #!/usr/bin/env Rscript
 # 00_build_gene_sets.R
 # Builds every KO gene list the analysis reads, in one pass. Replaces
-# 00_build_het_gene_reference.R and 00b_build_trophic_gene_sets.R (merged
+# 00_build_trophic_mode_panel.R and 00b_build_trophic_gene_sets.R (merged
 # 2026-10-25; originals in scripts/_to_delete/pre_gene_set_merge_20261025/).
 #
 # RUN (from the project root, or source() from anywhere in the project)
 #   Rscript scripts/00_build_gene_sets.R
 #
-# PART 1  Heterotrophy / phagotrophy reference panel
-#   IN   data/gene-lists/marker_panel_expansion_candidates.csv   (hand-curated)
-#        data/gene-lists/phagotrophy_genes_protists_1.csv        (hand-curated)
-#   OUT  data/gene-lists/het_gene_reference.csv                  (read by 06, 07)
-#        output-tables/00_het_gene_reference_unresolved.csv
+# PART 1  Trophic-mode panel (heterotrophy/phagotrophy, osmotrophy, symbiosis, parasitism)
+#   IN   data/gene-lists/marker_panel_expansion_candidates.csv          (hand-curated)
+#        data/gene-lists/phagotrophy_genes_protists_1.csv               (hand-curated)
+#        data/gene-lists/het_panel_new_rows_v3_20261107.csv             (hand-curated; added 2026-11-08)
+#        data/gene-lists/symbiosis_parasitism_genes_protists_20261108.csv
+#             (keep-verdict rows from candidates/symbiosis_parasitism_candidates_20261108.csv)
+#   OUT  data/gene-lists/trophic_mode_panel.csv                         (read by 06, 07)
+#        output-tables/00_trophic_mode_panel_unresolved.csv
 #
 # PART 2  Trophic gene sets (read by 06 and 07)
 #     kegg_level_c          KEGG pathway maps (level C) inside four level-B categories:
@@ -30,7 +33,7 @@
 #        data/external/burns2018/burns2018_uniprot_ko.csv        (cache; built on first run)
 #        data/gene-lists/protist_phagotrophy_experimental.csv    (hand-curated)
 #   OUT  data/gene-lists/trophic_gene_sets.csv
-#        output-tables/00b_het_reference_ko_names.csv            (curated label vs KEGG name)
+#        output-tables/00_trophic_mode_panel_ko_names.csv        (curated label vs KEGG name)
 #
 # NETWORK
 #   Only the first run needs the internet: UniProt accession -> KEGG gene -> KO via the
@@ -70,16 +73,37 @@ source("R/read_brite.R")
 
 
 # ==============================================================================
-# PART 1. Heterotrophy / phagotrophy reference panel
+# PART 1. Trophic-mode panel
 # ==============================================================================
 
 # --- paths -------------------------------------------------------------------
 path_expansion   <- "data/gene-lists/marker_panel_expansion_candidates.csv"
 path_phagotrophy <- "data/gene-lists/phagotrophy_genes_protists_1.csv"
-path_reference   <- "data/gene-lists/het_gene_reference.csv"
-path_unresolved  <- "output-tables/00_het_gene_reference_unresolved.csv"
+# >SKH: 2026-11-08 -- new heterotrophy rows and the symbiosis/parasitism rows join the panel
+path_new_rows    <- "data/gene-lists/het_panel_new_rows_v3_20261107.csv"
+path_sym_par     <- "data/gene-lists/symbiosis_parasitism_genes_protists_20261108.csv"
+path_panel       <- "data/gene-lists/trophic_mode_panel.csv"
+path_unresolved  <- "output-tables/00_trophic_mode_panel_unresolved.csv"
+# Pfam accession -> the name eggNOG-mapper writes in the PFAMs column (2026-11-08)
+path_pfam_map    <- "data/gene-lists/pfam_name_map.csv"
 
-stopifnot(file.exists(path_expansion), file.exists(path_phagotrophy))
+stopifnot(file.exists(path_expansion), file.exists(path_phagotrophy), file.exists(path_new_rows),
+          file.exists(path_sym_par), file.exists(path_pfam_map))
+
+# --- panel categories (2026-11-08) --------------------------------------------
+# The panel is organised by trophic mode: heterotrophy/phagotrophy, osmotrophy,
+# symbiosis and parasitism. The source lists keep their own category text
+# (`category_raw`); this map is the only place the trophic-mode labels live.
+# Symbiosis and parasitism rows come from path_sym_par (2026-11-08), which
+# carries its mode in a `Trophic_Mode` column.
+CATEGORY_MAP <- c(
+  "Phagotrophy"         = "Heterotrophy/phagotrophy",
+  "Heterotrophy"        = "Heterotrophy/phagotrophy",
+  "Osmotrophy contrast" = "Osmotrophy",
+  "Symbiosis"           = "Symbiosis",
+  "Parasitism"          = "Parasitism"
+)
+TROPHIC_MODES <- c("Heterotrophy/phagotrophy", "Osmotrophy", "Symbiosis", "Parasitism")
 
 # --- guard: malformed CSV quoting ---------------------------------------------
 # An unquoted comma inside a field (e.g. a gene named "PI(4,5)P2 3-kinase" or
@@ -186,13 +210,16 @@ SUBCATEGORY_MERGES <- c(
 #   "oxidative burst" vs "Antimicrobial / Prey Killing"
 #   "phosphoinositide conversion" vs "Engulfment Signal Transduction"
 
-# --- read both lists onto one schema -----------------------------------------
-# The two lists name the same things differently: `KEGG ID` vs `KEGG_KO`,
-# CATEGORY_00 / CATEGORY_01 vs a single `Category`. Only the phagotrophy list
-# carries KEGG_Pathway, so expansion-candidate rows get NA there.
+# --- read all lists onto one schema ------------------------------------------
+# The lists name the same things differently: `KEGG ID` vs `KEGG_KO`,
+# CATEGORY_00 / CATEGORY_01 vs a single `Category`. The phagotrophy-format lists
+# carry KEGG_Pathway; expansion-candidate rows get NA there. The new heterotrophy
+# rows share the phagotrophy format; the symbiosis/parasitism file adds
+# `Trophic_Mode`.
 panel_long <- bind_rows(
   read_panel_checked(path_expansion) |>
     transmute(kegg_raw     = `KEGG ID`,
+              pfam_raw     = `PFAM ID`,
               category     = CATEGORY_00,
               subcategory  = CATEGORY_01,
               gene         = `short gene name`,
@@ -200,21 +227,42 @@ panel_long <- bind_rows(
               source       = "expansion_candidates"),
   read_panel_checked(path_phagotrophy) |>
     transmute(kegg_raw     = KEGG_KO,
+              pfam_raw     = Pfam_ID,
               category     = "Phagotrophy",
               subcategory  = Category,
               gene         = Gene_Symbol,
               kegg_pathway = KEGG_Pathway,
-              source       = "phagotrophy_protists")) |>
+              source       = "phagotrophy_protists"),
+  read_panel_checked(path_new_rows) |>
+    transmute(kegg_raw     = KEGG_KO,
+              pfam_raw     = Pfam_ID,
+              category     = "Phagotrophy",
+              subcategory  = Category,
+              gene         = Gene_Symbol,
+              kegg_pathway = KEGG_Pathway,
+              source       = "het_new_rows_v3"),
+  read_panel_checked(path_sym_par) |>
+    transmute(kegg_raw     = as.character(KEGG_KO),
+              pfam_raw     = Pfam_ID,
+              category     = Trophic_Mode,
+              subcategory  = Category,
+              gene         = Gene_Symbol,
+              kegg_pathway = as.character(KEGG_Pathway),
+              source       = "symbiosis_parasitism_protists")) |>
   mutate(source_row = row_number()) |>
   # keep the source text, then canonicalize
   mutate(subcategory_raw = subcategory,
-         subcategory = coalesce(SUBCATEGORY_MERGES[subcategory], subcategory))
+         subcategory = coalesce(SUBCATEGORY_MERGES[subcategory], subcategory),
+         category_raw = category,
+         category = coalesce(unname(CATEGORY_MAP[category]), category))
+
+stopifnot(all(panel_long$category %in% TROPHIC_MODES))
 
 merged_report <- panel_long |>
   filter(subcategory != subcategory_raw) |>
   count(subcategory_raw, subcategory, name = "n_source_rows")
 if (nrow(merged_report)) {
-  message("[het-reference] subcategory merges applied:")
+  message("[trophic-mode-panel] subcategory merges applied:")
   print(merged_report)
 }
 
@@ -225,9 +273,44 @@ panel_resolved <- panel_long |>
   select(-kegg_raw) |>
   left_join(resolved, by = "source_row", relationship = "one-to-many")
 
+# --- Pfam fallback (2026-11-08) ------------------------------------------------
+# A gene is matched by its KEGG KO. When a source row yields no KO at all, it is
+# matched by its Pfam domain(s) instead. eggNOG-mapper writes Pfam NAMES in the
+# PFAMs column, so accessions are translated with `pfam_name_map.csv`. Each such
+# gene becomes one feature, "pfam:<name>[+<name>]"; 06 assigns a transcript to it
+# only when ALL of the transcript's Pfam domains are among that gene's domains,
+# because shared domains (e.g. saposin-like SapB inside prosaposin and aspartic
+# proteases) are not specific on their own.
+pfam_map <- read_csv(path_pfam_map, show_col_types = FALSE)
+
+rows_without_ko <- panel_resolved |>
+  summarise(any_ko = any(!is.na(ko_id)), .by = source_row) |>
+  filter(!any_ko) |>
+  pull(source_row)
+
+pfam_features <- panel_long |>
+  filter(source_row %in% rows_without_ko, str_detect(coalesce(pfam_raw, ""), "PF\\d{5}")) |>
+  mutate(pfam_acc  = map_chr(pfam_raw, \(x) paste(str_extract_all(x, "PF\\d{5}")[[1]], collapse = ";")))
+
+missing_acc <- setdiff(unlist(str_split(pfam_features$pfam_acc, ";")), pfam_map$pfam_acc)
+if (length(missing_acc)) {
+  stop("Pfam accession(s) not in ", path_pfam_map, ": ", paste(missing_acc, collapse = ", "),
+       ". Add each with the name eggNOG-mapper writes for it.", call. = FALSE)
+}
+
+pfam_features <- pfam_features |>
+  mutate(pfam_name  = map_chr(pfam_acc, \(a) paste(pfam_map$eggnog_name[match(str_split_1(a, ";"), pfam_map$pfam_acc)],
+                                                   collapse = ";")),
+         feature_id = paste0("pfam:", str_replace_all(pfam_name, ";", "+")),
+         match_type = "pfam",
+         ko_id      = NA_character_,
+         resolution_note = "no KO; matched by Pfam") |>
+  select(-kegg_raw, -pfam_raw, -kegg_pathway)
+
 # --- unresolved rows: write the log before filtering them out ----------------
+# rows with neither a KO nor a usable Pfam accession
 unresolved <- panel_resolved |>
-  filter(is.na(ko_id)) |>
+  filter(is.na(ko_id), !source_row %in% pfam_features$source_row) |>
   select(source_row, source, category, subcategory, subcategory_raw, gene, resolution_note) |>
   arrange(source, source_row)
 
@@ -261,45 +344,54 @@ pathway_canonical <- pathway_parsed |>
   slice_head(n = 1, by = pathway_id) |>
   transmute(pathway_id, pathway_label = paste(pathway_id, pathway_name))
 
-het_gene_reference <- pathway_parsed |>
+trophic_mode_panel <- pathway_parsed |>
   left_join(pathway_canonical, by = "pathway_id") |>
-  distinct(ko_id, source, category, subcategory, subcategory_raw, gene,
+  mutate(match_type = "ko", feature_id = ko_id,
+         pfam_acc = NA_character_, pfam_name = NA_character_) |>
+  bind_rows(pfam_features) |>
+  distinct(feature_id, match_type, ko_id, pfam_acc, pfam_name, source, category,
+           category_raw, subcategory, subcategory_raw, gene,
            pathway_id, pathway_name, pathway_label, resolution_note, source_row) |>
-  arrange(ko_id, source, source_row, pathway_id)
+  arrange(match_type, feature_id, source, source_row, pathway_id)
 
-write_csv(het_gene_reference, path_reference)
+write_csv(trophic_mode_panel, path_panel)
 
 # --- report ------------------------------------------------------------------
-n_ko        <- n_distinct(het_gene_reference$ko_id)
-n_boundary  <- het_gene_reference |>
+n_ko        <- n_distinct(na.omit(trophic_mode_panel$ko_id))
+n_pfam      <- n_distinct(trophic_mode_panel$feature_id[trophic_mode_panel$match_type == "pfam"])
+n_boundary  <- trophic_mode_panel |>
   filter(str_detect(coalesce(resolution_note, ""), "family_range_boundary")) |>
   distinct(ko_id) |>
   nrow()
-n_pathway   <- n_distinct(na.omit(het_gene_reference$pathway_id))
+n_pathway   <- n_distinct(na.omit(trophic_mode_panel$pathway_id))
 
 message(sprintf(
-  "[het-reference] %d source rows -> %d unique KOs (%d from family-range boundaries), %d KEGG pathways",
+  "[trophic-mode-panel] %d source rows -> %d unique KOs (%d from family-range boundaries), %d KEGG pathways",
   nrow(panel_long), n_ko, n_boundary, n_pathway))
-message(sprintf("[het-reference] %d source rows resolved to no KO -> %s",
+message(sprintf("[trophic-mode-panel] %d Pfam-matched features (no KO available)", n_pfam))
+message(sprintf("[trophic-mode-panel] %d source rows resolved to neither a KO nor a Pfam -> %s",
                 nrow(unresolved), path_unresolved))
-message(sprintf("[het-reference] wrote %s (%d rows)",
-                path_reference, nrow(het_gene_reference)))
+message(sprintf("[trophic-mode-panel] wrote %s (%d rows)",
+                path_panel, nrow(trophic_mode_panel)))
 
-het_gene_reference |>
-  distinct(ko_id, category) |>
-  count(category, name = "n_ko") |>
+trophic_mode_panel |>
+  distinct(feature_id, match_type, category) |>
+  count(category, match_type, name = "n_features") |>
   arrange(desc(n_ko)) |>
   print(n = Inf)
 
 # --- assertions --------------------------------------------------------------
 stopifnot(
-  nrow(het_gene_reference) > 0,
-  all(str_detect(het_gene_reference$ko_id, "^K\\d{5}$")),   # every id is a clean KO
-  !anyNA(het_gene_reference$ko_id),
-  !anyNA(het_gene_reference$category),
+  nrow(trophic_mode_panel) > 0,
+  # every KO-matched row has a clean KO; every row has a feature id
+  all(str_detect(trophic_mode_panel$ko_id[trophic_mode_panel$match_type == "ko"], "^K\\d{5}$")),
+  !anyNA(trophic_mode_panel$feature_id),
+  all(trophic_mode_panel$match_type %in% c("ko", "pfam")),
+  all(trophic_mode_panel$category %in% TROPHIC_MODES),
+  !anyNA(trophic_mode_panel$category),
   # no source row is silently lost: it either yields a KO or appears in the log
   setequal(panel_long$source_row,
-           union(het_gene_reference$source_row, unresolved$source_row))
+           union(trophic_mode_panel$source_row, unresolved$source_row))
 )
 
 
@@ -313,7 +405,7 @@ dir_burns         <- "data/external/burns2018"
 path_burns_cache  <- file.path(dir_burns, "burns2018_uniprot_ko.csv")
 path_experimental <- "data/gene-lists/protist_phagotrophy_experimental.csv"
 path_sets_out     <- "data/gene-lists/trophic_gene_sets.csv"
-path_names_out    <- "output-tables/00b_het_reference_ko_names.csv"
+path_names_out    <- "output-tables/00_trophic_mode_panel_ko_names.csv"
 
 # Level-B categories asked about (2026-10-21)
 LEVEL_B_KEEP <- c("09141" = "Transport and catabolism",
@@ -459,13 +551,14 @@ message("[trophic-sets] wrote ", path_sets_out, ": ")
 print(trophic_sets |> summarise(n_sets = n_distinct(set_name), n_kos = n_distinct(ko_id),
                                 .by = set_source))
 
-# --- 4. het_gene_reference: curated label next to KEGG's name ------------------
+# --- 4. trophic_mode_panel: curated label next to KEGG's name ------------------
 # A KO typed one digit off, or copied from a neighbouring row, silently puts a
 # different protein in the panel. This table lines up the label each row was curated
 # under with KEGG's own name for that KO so the panel can be checked by eye.
 # `label_in_kegg_name` is a crude screen (does any 3+ character token of the label
 # appear in the KEGG name?) -- FALSE means "read this row", TRUE does not prove a match.
-het_names <- het_gene_reference |>
+panel_names <- trophic_mode_panel |>
+  filter(match_type == "ko") |>                       # Pfam-matched rows have no KEGG name
   distinct(ko_id, gene, category, subcategory, source) |>
   left_join(ko_names, by = "ko_id") |>
   mutate(label_in_kegg_name = map2_lgl(gene, ko_name, \(g, k) {
@@ -476,9 +569,9 @@ het_names <- het_gene_reference |>
   })) |>
   arrange(label_in_kegg_name, ko_id)
 
-write_csv(het_names, path_names_out)
+write_csv(panel_names, path_names_out)
 message("[trophic-sets] wrote ", path_names_out, ": ",
-        sum(!het_names$label_in_kegg_name), " of ", nrow(het_names),
+        sum(!panel_names$label_in_kegg_name), " of ", nrow(panel_names),
         " label/KO pairs flagged for a read")
 
-invisible(list(het_gene_reference = het_gene_reference, trophic_sets = trophic_sets))
+invisible(list(trophic_mode_panel = trophic_mode_panel, trophic_sets = trophic_sets))

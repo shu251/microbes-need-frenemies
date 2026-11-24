@@ -181,7 +181,7 @@ long <- load_long_annot()
 
 ### Build paired df
 
-Shared prep for 02–06 (`R/prep_paired.R`): Gorda Ridge, Von Damm and Piccard; no per-row TPM cutoff; multi-KO transcripts split with TPM divided equally; Eukaryota-only and Opisthokonta lineages dropped. `depth = NULL` because the ladder assigns its own depth at each step.
+Shared prep for 02–06 (`R/prep_paired.R`): Gorda Ridge, Von Damm and Piccard; no per-row TPM cutoff; multi-KO transcripts split with TPM divided equally; Eukaryota-only lineages dropped; Opisthokonta dropped except choanoflagellates (2026-11-08). `depth = NULL` because the ladder assigns its own depth at each step.
 
 ```{r paired-table}
 paired <- prep_paired(long, depth = NULL)
@@ -339,7 +339,6 @@ resolution_by_depth
 readr::write_csv(resolution_by_depth, "output-tables/02_resolution_by_depth.csv")
 ```
 
-#### Supp figure S2
 ```{r grain-plot}
 #| fig-height: 5
 #| fig-width: 13
@@ -393,6 +392,7 @@ p_grain_tpm <- ggplot(resolution_by_depth, aes(grain, resolved_frac_tpm)) +
         plot.margin = margin(5.5, 5.5, 14, 5.5))
 ```
 
+### Figure S2.
 
 ```{r grain-plot-panel}
 #| fig-height: 5

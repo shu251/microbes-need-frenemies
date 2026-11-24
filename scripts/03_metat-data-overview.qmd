@@ -51,8 +51,10 @@ metadata_metaT <- sample_meta %>%
 
 ```
 
-Set up heat map
+### Color scaling for each parameter
+
 ```{r}
+# Named so each scale gets a legend title and a fixed legend position
 variable_fill <- list(
   "Sample type" = "VENT_BIN_ORDER",
   "Vent field" = "VENT_FIELD_ORDER",
@@ -64,63 +66,52 @@ variable_fill <- list(
   "Grazing" = "Grazing")
 
 scale_fill <- list(
-  scale_fill_manual(values = color_bin),
-  scale_fill_manual(values = color_field),
-  scale_fill_stepsn(colors = yl_red, breaks = c(25,50,75,100)),
-  scale_fill_stepsn(colors = yl_red, breaks = c(4,5,6,7,8)),
-  scale_fill_stepsn(colors = yl_red, breaks = c(100, 500, 1000, 1500, 2000)),
+  "Sample type" = scale_fill_manual(values = color_bin, name = "Sample type",
+                                    guide = guide_legend(order = 1)),
+  "Vent field"= scale_fill_manual(values = color_field, name = "Vent field",
+                                    guide = guide_legend(order = 2)),
+  "°C" = scale_fill_stepsn(colors = yl_red, breaks = c(25, 50, 75, 100),
+                                name = "°C", guide = guide_coloursteps(order = 3)),
+  "pH" = scale_fill_stepsn(colors = yl_red, breaks = c(4, 5, 6, 7, 8),
+                                name = "pH", guide = guide_coloursteps(order = 4)),
+  "Methane" = scale_fill_stepsn(colors = yl_red, breaks = c(100, 500, 1000, 1500, 2000),
+                                name = "Methane", guide = guide_coloursteps(order = 5)),
   # Biological
-  scale_fill_stepsn(colors = blues, breaks = c(2E4,1E5,2E5,1E6,2E6)),
-  scale_fill_stepsn(colors = blues, breaks = c(200,400,600,800)),
-  scale_fill_stepsn(colors = blues, breaks = c(1E3,3E3, 5E3, 7E3, 9E3)))
-names(scale_fill) <- names(variable_fill)
+  "Prok" = scale_fill_stepsn(colors = blues, breaks = c(2E4, 1E5, 2E5, 1E6, 2E6),
+                                name = "Prok", guide = guide_coloursteps(order = 6)),
+  "Euk" = scale_fill_stepsn(colors = blues, breaks = c(200, 400, 600, 800),
+                                name = "Euk", guide = guide_coloursteps(order = 7)),
+  "Grazing" = scale_fill_stepsn(colors = blues, breaks = c(1E3, 3E3, 5E3, 7E3, 9E3),
+                                name = "Grazing", guide = guide_coloursteps(order = 8))
+)
 var_levels <- names(variable_fill)
+# stopifnot(identical(names(scale_fill), var_levels))  # catches a list falling out of sync
 ```
 
-Plot loop. 
+### Loop for heat map plot
 ```{r}
 vent_heatmap <- ggplot(metadata_metaT, aes(y = SAMPLE_NAME_ORDER)) +
-  purrr::imap(
-    variable_fill, \(x, y) {
-      list(
-        geom_tile(
-          aes(
-            x = y,
-            fill = .data[[x]]
-          ),
-          color = "black",
-          width = .95
-        ),
-        scale_fill[[y]],
-        ggnewscale::new_scale_fill()
-      )
-    }
-  ) +
-  scale_x_discrete(
-    limits = var_levels
-  ) +
-  theme_void() +
+  purrr::imap(variable_fill, \(x, y) {
+    list(
+      geom_tile(aes(x = y, fill = .data[[x]]), color = "white", width = 1),
+      scale_fill[[y]],
+      ggnewscale::new_scale_fill()
+    )
+  }) +
+  scale_x_discrete(limits = var_levels) +
+  theme_classic() +
   theme(
-    axis.text.y = element_blank(),
-    axis.text.x = element_text(
-      angle = 90,
-      hjust = 1
-    ),
-    axis.title = element_blank(),
-    strip.text = element_blank(),
-    legend.position = "right",
-    panel.border = element_rect(fill = NA, linewidth = 0.8),
-    panel.background = element_rect(colour = NA, fill = "transparent"),
-    plot.background = element_rect(colour = NA, fill = "transparent"),
-    plot.margin = margin(0, 0, 0, 0, "cm"),
-    panel.spacing = unit(0, "cm"),
-    legend.title = element_blank()
+    axis.text.y = element_text(color = "black", hjust = 1),
+    axis.text.x = element_text(color = "black", angle = 90, hjust = 1),
+    axis.title  = element_blank(),
+    legend.position = "right"
   )
 ```
 
-```{r preview heatmap, fig.height=8.5, fig.width=5}
+```{r,fig.height=8.5, fig.width=8}
 vent_heatmap
 ```
+
 
 ## Pairwise comparison of samples
 
@@ -199,7 +190,7 @@ chord_all <- euclidean_compare_all %>%
 chord_all
 ```
 
-Superseded: this chord-distance heatmap is kept as the starting point for the diagnostics below. The figure version (`euclidean_all`) is rebuilt after them.
+Use this chord-distance heatmap as the starting point for the diagnostics below. The figure version (`euclidean_all`) is rebuilt after them.
 
 ### Diagnostics: why are most distances > 0.9?
 
@@ -458,11 +449,27 @@ tax_domain_supergroup <- long_frenemies_annot %>%
   group_by(SUPERGROUP_18S, Domain, Supergroup, LOCATION, VENT_FIELD, VENT_BIN) %>%
     summarise(SUM_TPM = sum(scaledTPM))
 
-# head(tax_domain_supergroup)
+head(tax_domain_supergroup)
 tax_domain_supergroup$Domain[tax_domain_supergroup$Domain == ""] <- NA
 # unique(tax_domain_supergroup$Domain)
 # head(tax_domain_supergroup)
 ```
+What percent of data was no domain?
+```{r}
+tmp <- tax_domain_supergroup %>% 
+  mutate(Domain = replace_na(Domain, "No Domain"),
+         Domain = str_replace(Domain, "No supergroup", "No Domain")) %>% 
+  filter(Domain != "") |> 
+  group_by(Domain, VENT_BIN) %>% 
+  summarise(SUM_BY_DOMAIN = sum(SUM_TPM))
+
+sumtotal <- sum(tmp$SUM_BY_DOMAIN)
+
+tmp |> 
+  mutate(PERC_TOTAL = 100*(SUM_BY_DOMAIN/sumtotal))
+```
+
+
 
 Plot domain across all samples.
 
@@ -477,8 +484,9 @@ domain <- tax_domain_supergroup %>%
   mutate(
          field_ORDER = factor(VENT_FIELD, levels = order_field),
          bin_ORDER = factor(VENT_BIN, levels = order_bin)) %>% 
-  ggplot(aes(x = LOCATION, y = COUNT_BY_LEVEL, fill = Domain)) +
-    geom_bar(stat = "identity", color = "black") +
+  filter(Domain != "No Domain") |> 
+  ggplot(aes(x = LOCATION, y = SUM_BY_DOMAIN, fill = Domain)) +
+    geom_bar(stat = "identity", position = "fill", color = "black") +
     facet_grid(cols = vars(field_ORDER), scales = "free_x", space = "free") +
   scale_fill_manual(values = c("#CB755F", "#EFDE8A", "#373272", "#747B35", "#9BC5D6")) +
   theme_classic() +
@@ -491,7 +499,8 @@ domain <- tax_domain_supergroup %>%
         axis.title = element_text(color = "black",size = 14),
         axis.text.y = element_text(color = "black",  size = 14),
         panel.grid.major = element_line(color = "#d9d9d9", linewidth = 0.3)) +
-  labs(x = "", y = "Total transcripts recovered")
+  labs(x = "", y = "Proportion of recovered transcripts")
+domain
 ```
 
 ## Taxonomic resolution for annotation
@@ -529,24 +538,24 @@ supp_tax_assigned_level <- long_frenemies_annot %>%
   labs(x = "", y = "Proportion")
 ```
 
-### Supplementary fig
 
+### Figure S1
 ```{r, fig.width=8, fig.height=10}
 domain + supp_tax_assigned_level +
   plot_layout(nrow = 2)
-#ggsave("figures/domain-composition.svg", width = 8, height = 10, device = "svg", limitsize = FALSE)
+# ggsave("figures/domain-composition.svg", width = 8, height = 10, device = "svg", limitsize = FALSE)
 ```
 
 ## By taxonomic groups
 
 SUPERGROUP_0_ordering and tax_color_metaT now live in `R/color_order.R`. Load with _setup script.
 
-Composition is computed on the shared analysis set (`R/prep_paired.R`), the same transcripts 04–07 test: Gorda Ridge, Von Damm and Piccard; lineage resolved past "Eukaryota"; at least one KO; Opisthokonta dropped. Replicate libraries are averaged to their biological unit (`unit_expression()`). This is the KO-annotated fraction of eukaryotic expression, not all eukaryotic transcripts.
+Composition is computed on the shared analysis set (`R/prep_paired.R`), the same transcripts 04–07 test: Gorda Ridge, Von Damm and Piccard; lineage resolved past "Eukaryota"; at least one KO; Opisthokonta dropped except choanoflagellates. Replicate libraries are averaged to their biological unit (`unit_expression()`). This is the KO-annotated fraction of eukaryotic expression, not all eukaryotic transcripts.
 
 ```{r group-unit}
 #| message: true
-long       <- load_long_annot(long = long_frenemies_annot_tax)
-paired     <- prep_paired(long, depth = 4L)
+long <- load_long_annot(long = long_frenemies_annot_tax)
+paired <- prep_paired(long, depth = 4L)
 group_unit <- unit_expression(paired, "cur_group")
 ```
 
@@ -573,12 +582,12 @@ fig_group_bars
 ```
 
 # Large heat map
-
+### Figure 1
 The habitat facet is dropped here so bar rows line up with the heat map and distance panels.
 
-```{r, fig.height=10, fig.width=22}
-vent_heatmap + (fig_group_bars + facet_null()) + euclidean_all + plot_layout(nrow = 1, guides = "collect", widths = c(0.5, 1, 1))
-#ggsave("figures/large-heatmap.svg", width = 22, height = 10, device = "svg", limitsize = FALSE)
+```{r, fig.height=10, fig.width=24}
+vent_heatmap + (fig_group_bars + facet_null()) + euclidean_all + plot_layout(nrow = 1, guides = "collect", widths = c(0.5, 1, 1.5))
+# ggsave("figures/large-heatmap.svg", width = 24, height = 10, device = "svg", limitsize = FALSE)
 ```
 
 # Tables & Supplementary tables
@@ -614,6 +623,108 @@ tables1 <- assem |>
 
 write.csv(tables1, file = "output-tables/table-S1.csv")
 ```
+
+## Taxa within vents and outside of vents
+
+Percent of each biological unit's retained eukaryotic expression (scaledTPM, KO-annotated; the same data as `fig_group_bars`), summarised as the mean ± SD across units within each habitat. Units where a taxon is absent count as 0%, so the means sum to 100% within a habitat. `group_unit` is the curated group in the bar plot; `l4_unit` is the same data at grain 4 (`cur_L4`). Rows ending in "(unres.)" are lineages with fewer than 4 real ranks.
+
+```{r taxa-summary-fn}
+# Mean +/- SD percent of unit expression by habitat for one set of taxon columns
+summarise_taxa_by_habitat <- function(ue, by) {
+  units <- distinct(ue, unit, vent_bin, field)
+  ue |>
+    complete_units(units, by) |>
+    summarise(mean_pct = 100 * mean(share),
+              sd_pct   = 100 * sd(share),
+              n_units  = n(),
+              .by = c(all_of(by), vent_bin)) |>
+    mutate(pct = sprintf("%.1f ± %.1f", mean_pct, sd_pct)) |>
+    pivot_wider(names_from = vent_bin,
+                values_from = c(mean_pct, sd_pct, n_units, pct),
+                names_glue = "{vent_bin}_{.value}")
+}
+```
+
+```{r taxa-summary-group}
+group_summary <- summarise_taxa_by_habitat(group_unit, "cur_group") |>
+  mutate(cur_group = factor(cur_group, levels = SUPERGROUP_0_ordering)) |>
+  arrange(cur_group) |>
+  mutate(cur_group = as.character(cur_group))
+
+group_summary |>
+  select(cur_group, Vent = Vent_pct, `Non-vent` = `Non-vent_pct`)
+```
+
+```{r taxa-summary-L4}
+l4_unit <- unit_expression(paired, c("cur_group", "cur_L4"))
+
+l4_summary <- summarise_taxa_by_habitat(l4_unit, c("cur_group", "cur_L4")) |>
+  mutate(taxon_L4 = taxon_label_unique(cur_L4),
+         resolved_L4 = !str_detect(cur_L4, "\\(unres\\.\\)$"),
+         cur_group= factor(cur_group, levels = SUPERGROUP_0_ordering)) |>
+  arrange(cur_group, desc(Vent_mean_pct)) |>
+  mutate(cur_group = as.character(cur_group))
+
+l4_summary |>
+  select(cur_group, taxon_L4, Vent = Vent_pct, `Non-vent` = `Non-vent_pct`)
+```
+
+
+Check: each habitat should sum to 100% at both ranks.
+
+```{r taxa-summary-check}
+# list(group = group_summary, L4 = l4_summary) |>
+#   map(\(df) summarise(df, Vent = sum(Vent_mean_pct), `Non-vent` = sum(`Non-vent_mean_pct`))) |>
+#   list_rbind(names_to = "rank")
+```
+
+```{r taxa-summary-write}
+l4_summary |>
+  select(cur_group, cur_L4, taxon_L4, resolved_L4,
+         vent_mean_pct = Vent_mean_pct, vent_sd_pct = Vent_sd_pct, vent_n_units = Vent_n_units,
+         nonvent_mean_pct = `Non-vent_mean_pct`, nonvent_sd_pct = `Non-vent_sd_pct`,
+         nonvent_n_units = `Non-vent_n_units`) |>
+  write_csv("output-tables/03_taxa_vent_vs_nonvent_L4.csv")
+
+group_summary |>
+  select(cur_group,
+         vent_mean_pct = Vent_mean_pct, vent_sd_pct = Vent_sd_pct,
+         nonvent_mean_pct = `Non-vent_mean_pct`, nonvent_sd_pct = `Non-vent_sd_pct`) |>
+  write_csv("output-tables/03_taxa_vent_vs_nonvent_group.csv")
+```
+
+
+```{r}
+habitat_pal <- c(Vent = "#b74a70", `Non-vent` = "#346D6E")
+```
+
+```{r}
+head(l4_summary)
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 15
+
+l4_summary |> 
+  select(cur_group, cur_L4, taxon_L4,
+         vent_mean_pct = Vent_mean_pct, vent_sd_pct = Vent_sd_pct,
+         nonvent_mean_pct = `Non-vent_mean_pct`, nonvent_sd_pct = `Non-vent_sd_pct`) |>
+  pivot_longer(cols = c(starts_with("vent_"), starts_with("nonvent_")),
+               names_to = c("HABITAT", ".value"),
+               names_pattern = "(vent|nonvent)_(mean|sd)_pct") |> 
+  filter(mean >= 0.1) |>
+  mutate(lower = pmax(mean - sd, 0.01),
+         upper = mean + sd) |> 
+  ggplot(aes(y = taxon_L4, x = mean, color = HABITAT)) +
+  geom_pointrange(aes(xmin = lower, xmax = upper), position = position_dodge(width = 0.6), size = 0.3) +
+  # geom_pointrange(aes(xmin = (mean-sd), xmax = mean+sd), position = position_dodge(width = 0.6), size = 0.3) +
+  facet_grid(rows = vars(cur_group), scales = "free_y", space = "free") +
+  scale_x_log10() +
+  theme_bw()
+```
+
 
 # Session Information
 

@@ -1,0 +1,209 @@
+<!-- Paste directly after the `fig-span-habitat` chunk in 05b-lineage-profiles.qmd.
+     Needs objects already built there: ko_span_hab, pair_all, carrier_tbl(), brite_map (curated),
+     tax_key, PAIR_MIN_UNITS, class_levels, class_lab, span_levels, span_pal, span_lab.
+     NOT YET RUN: no R reachable from this shell. Run interactively and check the stopifnot()s first. -->
+
+## Who and what sits behind each span bar
+
+Same x axis as the span figure: the five 05 habitat classes, drawn first in full and then
+with `pool = TRUE`, which folds them to **vent-associated** (vent-only + vent-skewed),
+**shared**, and **non-vent-associated** (non-vent-skewed + non-vent-only). Contributing
+taxa are computed in vent units for vent-associated KOs and in non-vent units for
+non-vent-associated ones, so the vent panel holds the vent classes plus shared and the
+non-vent panel holds shared plus the non-vent classes.
+
+Row 1 is span, row 2 is curated KEGG level B, row 3 is the curated taxonomic group of the
+contributing taxa. Each row is drawn two ways: **KO counts** (repertoire; each KO = 1) and
+**expression** (activity; each KO = its summed scaledTPM in that habitat). A KO in several
+level-B categories is split equally across them (`n_cat`, as in 04); a KO outside the
+curated KEGG set is kept as its own segment, so every row has the same denominator.
+
+```{r span-composition}
+#| message: true
+N_SHOWN  <- 12
+OTHER    <- "Other categories"
+NO_KEGG  <- "Outside curated KEGG set"
+NO_TAXON <- "No contributing taxon"   # count: KO has none; expression: TPM not on a contributing taxon
+
+# the five 05 classes are the default; `pool = TRUE` folds them to Vent / Shared / Non-vent
+pool_map    <- c(vent_only = "Vent", vent_skewed = "Vent", shared = "Shared",
+                 nonvent_skewed = "Non-vent", nonvent_only = "Non-vent")
+pool_levels <- c("Vent", "Shared", "Non-vent")
+x_levels <- function(pool) if (pool) pool_levels else class_levels
+x_lab    <- function(pool) if (pool) set_names(pool_levels) else class_lab
+x_title  <- function(pool) if (pool) "Habitat class of the KO (05, pooled)" else "Habitat class of the KO (05)"
+set_class <- function(d, pool) mutate(d, habitat_class = if (pool) habitat_pool else habitat_class)
+
+# KO x habitat universe (the KOs in fig_span_habitat) with summed habitat expression
+ko_univ <- ko_span_hab |>
+  transmute(ko_id, span_rank = as.character(span_rank),
+            habitat_class = as.character(habitat_class),
+            habitat = if_else(habitat == "vent", "Vent", "Non-vent")) |>
+  mutate(habitat_pool = unname(pool_map[habitat_class])) |>
+  left_join(pair_all |>
+              summarise(Vent = sum(tpm_vent), `Non-vent` = sum(tpm_nonvent), .by = ko_id) |>
+              pivot_longer(c(Vent, `Non-vent`), names_to = "habitat", values_to = "ko_tpm"),
+            by = c("ko_id", "habitat")) |>
+  mutate(ko_tpm = replace_na(ko_tpm, 0))
+stopifnot(!anyDuplicated(ko_univ[c("ko_id", "habitat")]), !anyNA(ko_univ$habitat_pool),
+          all(ko_univ$habitat_class %in% class_levels))
+
+# which classes occur in each habitat (vent: vent-only, vent-skewed, shared; non-vent: the other three)
+ko_univ |> count(habitat, habitat_class) |> pivot_wider(names_from = habitat_class, values_from = n, values_fill = 0)
+
+# contributing-taxon pairs in both habitats, with curated group
+contrib <- bind_rows(
+    carrier_tbl("vent",    PAIR_MIN_UNITS) |> mutate(habitat = "Vent"),
+    carrier_tbl("nonvent", PAIR_MIN_UNITS) |> mutate(habitat = "Non-vent")) |>
+  select(ko_id, habitat, cur_L4, pair_tpm) |>
+  left_join(tax_key |> select(cur_L4, cur_group), by = "cur_L4") |>
+  semi_join(ko_univ, by = c("ko_id", "habitat"))
+stopifnot(!anyNA(contrib$cur_group))
+
+weight_of <- function(d, weight) mutate(d, w = if (weight == "count") 1 else ko_tpm)
+
+# --- row builders: each returns habitat, habitat_class, cat, w ---------------
+row_span <- function(weight, pool) {
+  ko_univ |> set_class(pool) |> weight_of(weight) |>
+    rename(cat = span_rank) |>
+    summarise(w = sum(w), .by = c(habitat, habitat_class, cat))
+}
+
+row_kegg_b <- function(weight, pool) {
+  ko_univ |> set_class(pool) |> weight_of(weight) |>
+    left_join(brite_map |> select(ko_id, description, n_cat), by = "ko_id",
+              relationship = "many-to-many") |>
+    mutate(description = replace_na(description, NO_KEGG), n_cat = replace_na(n_cat, 1L)) |>
+    rename(cat = description) |>
+    summarise(w = sum(w / n_cat), .by = c(habitat, habitat_class, cat))
+}
+
+row_group <- function(weight, pool) {
+  univ <- ko_univ |> set_class(pool)
+  if (weight == "count") {
+    assigned <- contrib |>
+      distinct(ko_id, habitat, cur_group) |>
+      mutate(w = 1 / n(), .by = c(ko_id, habitat)) |>
+      left_join(univ |> select(ko_id, habitat, habitat_class), by = c("ko_id", "habitat"))
+    unassigned <- univ |>
+      anti_join(contrib |> distinct(ko_id, habitat), by = c("ko_id", "habitat")) |>
+      transmute(habitat, habitat_class, cur_group = NO_TAXON, w = 1)
+  } else {
+    assigned <- contrib |>
+      summarise(w = sum(pair_tpm), .by = c(ko_id, habitat, cur_group)) |>
+      left_join(univ |> select(ko_id, habitat, habitat_class), by = c("ko_id", "habitat"))
+    unassigned <- univ |>
+      left_join(assigned |> summarise(a = sum(w), .by = c(ko_id, habitat)), by = c("ko_id", "habitat")) |>
+      mutate(w = pmax(ko_tpm - replace_na(a, 0), 0)) |>
+      filter(w > 0) |>
+      transmute(habitat, habitat_class, cur_group = NO_TAXON, w)
+  }
+  bind_rows(assigned |> select(habitat, habitat_class, cur_group, w), unassigned) |>
+    rename(cat = cur_group) |>
+    summarise(w = sum(w), .by = c(habitat, habitat_class, cat))
+}
+
+# --- shared plotting helpers ------------------------------------------------
+lump_cat <- function(d, n_show, grey = character()) {
+  tot  <- d |> summarise(w = sum(w), .by = cat) |> arrange(desc(w))
+  top  <- setdiff(tot$cat, c(grey, OTHER)) |> head(n_show)
+  d |> mutate(cat = if_else(cat %in% c(top, grey), cat, OTHER)) |>
+    summarise(w = sum(w), .by = c(habitat, habitat_class, cat)) |>
+    mutate(cat = factor(cat, levels = c(top, intersect(c(OTHER, grey), unique(cat)))))
+}
+
+cat_pal <- function(d, grey = character()) {
+  lv <- levels(d$cat); colour_lv <- setdiff(lv, c(OTHER, grey))
+  c(setNames(scales::hue_pal(l = 62, c = 75)(length(colour_lv)), colour_lv),
+    setNames(rep(c("grey85", "grey65", "grey45"), length.out = length(setdiff(lv, colour_lv))),
+             setdiff(lv, colour_lv)))[lv]
+}
+
+as_x <- function(d, pool) {
+  d |> mutate(habitat_class = factor(habitat_class, levels = x_levels(pool)),
+              habitat = factor(habitat, levels = c("Vent", "Non-vent")))
+}
+
+stack_row <- function(d, pal, pool, lab = ggplot2::waiver(), ylab, show_x = FALSE,
+                      show_strip = FALSE, n_tbl = NULL) {
+  p <- as_x(d, pool) |>
+    ggplot(aes(habitat_class, w, fill = cat)) +
+    geom_col(position = "fill", width = 0.8) +
+    scale_fill_manual(values = pal, labels = lab, name = NULL, drop = FALSE) +
+    scale_x_discrete(labels = x_lab(pool)) +
+    scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.08))) +
+    facet_wrap(~ habitat, scales = "free_x") +
+    labs(x = if (show_x) x_title(pool) else NULL, y = ylab) +
+    theme_minimal(base_size = 9) +
+    theme(legend.position = "right", legend.key.size = unit(0.35, "cm"),
+          axis.text.x = if (show_x) element_text(angle = if (pool) 20 else 30, hjust = 1) else element_blank(),
+          strip.text = if (show_strip) element_text(face = "bold") else element_blank())
+  if (!is.null(n_tbl))
+    p <- p + geom_text(data = as_x(n_tbl, pool), aes(x = habitat_class, y = 1.02, label = n),
+                       inherit.aes = FALSE, size = 2.6, vjust = 0)
+  p
+}
+
+fig_span_composition <- function(weight = c("count", "tpm"), pool = FALSE) {
+  weight <- match.arg(weight)
+  ylab <- if (weight == "count") "Share of KOs" else "Proportion of expression (scaledTPM)"
+  n_tbl <- ko_univ |> set_class(pool) |> summarise(n = n(), .by = c(habitat, habitat_class))
+
+  d_span <- row_span(weight, pool) |> mutate(cat = factor(cat, levels = span_levels))
+  d_b    <- row_kegg_b(weight, pool) |> lump_cat(N_SHOWN, grey = NO_KEGG)
+  d_g    <- row_group(weight, pool)  |> lump_cat(N_SHOWN, grey = NO_TAXON)
+
+  # every row must carry the same mass per habitat x class as row 1
+  chk <- bind_rows(span = d_span, kegg = d_b, group = d_g, .id = "row") |>
+    mutate(cat = as.character(cat)) |>
+    summarise(w = sum(w), .by = c(row, habitat, habitat_class)) |>
+    pivot_wider(names_from = row, values_from = w)
+  stopifnot(isTRUE(all.equal(chk$span, chk$kegg)), isTRUE(all.equal(chk$span, chk$group)))
+
+  (stack_row(d_span, span_pal, pool, span_lab, ylab, show_strip = TRUE, n_tbl = n_tbl) /
+   stack_row(d_b, cat_pal(d_b, NO_KEGG), pool, ylab = ylab) /
+   stack_row(d_g, cat_pal(d_g, NO_TAXON), pool, ylab = ylab, show_x = TRUE)) +
+    plot_layout(heights = c(1, 1.2, 1.2))
+}
+```
+
+```{r fig-span-composition-count}
+#| fig-width: 10
+#| fig-height: 9
+#| fig-cap: "What sits behind each span bar, counted by KO. Columns are the five 05 habitat classes; the number above each bar is its KO count. Left, contributing taxa computed in vent units; right, in non-vent units; shared KOs appear in both panels. Top, taxonomic span of the contributing taxa (as the previous figure). Middle, curated KEGG level B of the KOs (a KO in several categories is split equally; the 12 largest categories are shown, the rest pooled). Bottom, curated taxonomic group of the contributing taxa (a KO with several groups is split equally among them; KOs with none are shown separately). Every row sums to the same set of KOs."
+fig_span_composition("count")
+# ggsave("figures/05b-span-composition-count.svg", fig_span_composition("count"), width = 10, height = 9)
+```
+
+```{r fig-span-composition-tpm}
+#| fig-width: 10
+#| fig-height: 9
+#| fig-cap: "As the previous figure, weighted by expression: each KO contributes its summed scaledTPM in that habitat instead of 1. Numbers above the bars remain KO counts. In the bottom row a KO's expression is divided among the groups of its contributing taxa by their own expression; the part not carried by a contributing taxon is shown as 'No contributing taxon'."
+fig_span_composition("tpm")
+# ggsave("figures/05b-span-composition-tpm.svg", fig_span_composition("tpm"), width = 10, height = 9)
+```
+
+### Pooled: vent-associated, shared, non-vent-associated
+
+The same two figures with the five classes folded to three. Vent-only and vent-skewed differ
+sharply in span (64.5% vs 37.5% class-restricted), so the pooled vent bar averages over a real
+contrast -- the pooled version is for the overview, the five-class version for the numbers
+quoted in the text.
+
+```{r fig-span-composition-pooled-count}
+#| fig-width: 9
+#| fig-height: 9
+#| fig-cap: "What sits behind each span bar with the 05 habitat classes pooled to vent-associated (vent-only + vent-skewed), shared, and non-vent-associated (non-vent-skewed + non-vent-only), counted by KO. Rows, panels and category rules as in the five-class figure above; the number above each bar is its KO count."
+fig_span_composition("count", pool = TRUE)
+# ggsave("figures/05b-span-composition-pooled-count.svg", fig_span_composition("count", pool = TRUE), width = 9, height = 9)
+```
+
+```{r fig-span-composition-pooled-tpm}
+#| fig-width: 9
+#| fig-height: 9
+#| fig-cap: "As the pooled figure above, weighted by expression: each KO contributes its summed scaledTPM in that habitat instead of 1. Numbers above the bars remain KO counts."
+fig_span_composition("tpm", pool = TRUE)
+# ggsave("figures/05b-span-composition-pooled-tpm.svg", fig_span_composition("tpm", pool = TRUE), width = 9, height = 9)
+```
+
+> For results: whether the KEGG level-B and taxonomic-group mix of class-restricted KOs differs from cross-supergroup KOs within a habitat class, and whether the count and expression versions agree. A level B that is large by count but small by expression (or the reverse) is a repertoire-versus-activity split.

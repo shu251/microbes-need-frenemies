@@ -1,0 +1,874 @@
+---
+title: "06 — Trophic-mode panel: presence/absence across the dataset"
+author: "Hu Lab"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: show
+    df-print: paged
+---
+
+# Questions
+
+* **A. The panel.** How many features and subcategories does each trophic mode hold?
+* **B. Feature × sample unit.** In which units is each panel feature detected, and how does that track each unit's sequencing depth?
+* **C. Feature × habitat.** What is the habitat class of each panel feature (vent only, shared, non-vent only, ...)?
+* **D. Taxon × feature × habitat.** Which class-level (L4) taxa carry each panel feature, at vents, at non-vents, or at both, and how widespread is each across all samples? Every panel gene is scored against every L4 taxon, absences included.
+* **E. Experimental phagotrophy genes.** Which KOs whose loss impairs phagotrophy *in a protist* are detected, and among which lineages?
+* **F. Lineage KO pools.** How many KOs does each lineage group (symbiotic or parasitic vs. free-living relatives) contribute? Reported as pool sizes only: the pools are too small to support a gene-set contrast (the rarefied focal − reference contrast was removed on 2026-11-10).
+
+**Rules** (`config/params.yml`, shared with 05, 05b and 07):
+
+* *Detected* in a unit: ≥ 1 scaledTPM and ≥ 10 per million of the unit's retained expression (`unit_expression()`). The unit total always comes from the full paired table, so panel features use the same denominator as every KO in 05.
+* *Present in a habitat*: detected in ≥ 3 of that habitat's units (`vent_min_units`, `nonvent_min_units`: ≥ 3 of 13 vent, ≥ 3 of 6 non-vent), the 05 rule (2026-11-23). One count rule for features (C), taxon × feature pairs (D), and the pairs behind E and F. The all-samples P/A panel keeps ≥ 30% of the 19 units (≥ 6) as a "widespread across the dataset" bar. The old 30% habitat rule (≥ 4 of 13, ≥ 2 of 6) and fixed counts (≥ 1 and ≥ 2 units per habitat) are reported as sensitivity.
+* *Panel features*: a gene is matched by its KEGG KO; a gene with no KO is matched by Pfam domain, and a transcript counts only when all of its Pfam domains belong to that gene (`feature_id` = `pfam:<domain>`). Panel rows are compiled by `scripts/00_build_gene_sets.R`.
+* These are compositional data and the panel is question-driven, so nothing in A–D is tested. Presence means a feature's share of a unit clears detection, not a count of cells, and absence can mean low expression as well as missing genes (no matched metagenome).
+
+# Set up
+
+```{r setup}
+#| message: false
+#| warning: false
+source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R")
+```
+
+```{r params}
+FIELDS_IN_SCOPE <- c("Gorda Ridge", "Von Damm", "Piccard")
+CHOSEN_DEPTH <- 4
+MIN_TPM <- params$detect_min_tpm
+MIN_PER_MILLION <- params$detect_min_per_million
+OCC_MIN <- params$occupancy_min_frac  # all-samples P/A panel (>= 30% of 19 = 6) and the old-rule sensitivity
+# habitat calls follow 05 (2026-11-23): unit counts; C also uses plume-tolerant vent-only
+MIN_UNITS <- c(vent = params$vent_min_units, nonvent = params$nonvent_min_units)  # 3, 3
+VENTONLY_TOLERATED <- params$ventonly_tolerated_tokens                           # "Plume"
+SENS_MIN_UNITS <- c(1, 2) # fixed per-habitat unit counts (sensitivity)
+
+# the four trophic modes; the same labels as CATEGORY_MAP in scripts/00_build_gene_sets.R
+TROPHIC_MODES <- c("Heterotrophy/phagotrophy", "Osmotrophy", "Symbiosis", "Parasitism")
+
+PANEL_TABLE <- "data/gene-lists/gene_candidates_central.csv"  # scripts/00c_build_central_table.R (>SKH: 2026-11-12)
+SETS_TABLE <- "data/gene-lists/trophic_gene_sets.csv"  # scripts/00_build_gene_sets.R
+EXPERIMENTAL <- "data/gene-lists/protist_phagotrophy_experimental.csv"
+HABITAT_TABLE <- "output-tables/05_ko_habitat_class.csv"# from 05
+PAIR_TABLE <- "output-tables/05b_taxon_ko_pairs.csv.gz" # from 05b (all lienage-resolved KOs
+
+VENT_ASSOCIATED <- c("vent_only", "vent_skewed", "shared")
+class_levels <- c("vent_only", "vent_skewed", "shared", "nonvent_skewed", "nonvent_only",
+                  "below_filter", "not_detected")
+class_pal <- c(vent_only = "#b74a70", vent_skewed = "#dba3b8", shared = "grey45",
+               nonvent_skewed = "#9cc2c2", nonvent_only = "#346D6E",
+               below_filter = "grey85", not_detected = "white")
+
+presence_lab <- c(vent_only = "Vent only", nonvent_only = "Non-vent only",
+                  both = "Vent and non-vent")
+presence_pal <- c(vent_only = "#b74a70", nonvent_only = "#346D6E", both = "grey45")
+```
+
+# A. The panel
+
+One row per feature × subcategory (a feature in two subcategories counts in both), and one row per feature for the feature tables. Every `category` must be one of the four trophic modes. A mode with no rows yet is still listed with zero features, so an empty mode is visible rather than silently missing.
+
+```{r panel}
+#| message: true
+# >SKH: 2026-11-12 central table; unresolved rows (no KO or Pfam yet) stay in the
+# table but are not matched here
+panel_ref <- read_csv(PANEL_TABLE, show_col_types = FALSE) |>
+  filter(!is.na(subcategory), status != "unresolved", !is.na(feature_id))
+
+unknown_modes <- setdiff(unique(panel_ref$category), TROPHIC_MODES)
+if (length(unknown_modes)) {
+  stop("Panel categories outside the four trophic modes: ",
+       paste(unknown_modes, collapse = ", "),
+       ". Add them to CATEGORY_MAP in scripts/00_build_gene_sets.R.", call. = FALSE)
+}
+
+panel_long <- panel_ref |>
+  distinct(feature_id, match_type, category, subcategory, gene) |>
+  mutate(category = factor(category, levels = TROPHIC_MODES))
+
+# >SKH: 2026-11-12 a feature in two modes (shared_flag from 00c) is plotted once, under
+# heterotrophy/phagotrophy, and marked with a dagger; the tables keep both modes
+shared_key <- panel_ref |>
+  summarise(shared_modes = first(na.omit(shared_modes)),
+            shared = any(shared_flag %in% TRUE), .by = feature_id) |>
+  mutate(primary_category = if_else(shared, "Heterotrophy/phagotrophy", NA_character_))
+
+panel_plot <- panel_long |>
+  left_join(select(shared_key, feature_id, primary_category), by = "feature_id") |>
+  filter(is.na(primary_category) | category == primary_category) |>
+  select(-primary_category)
+
+# >SKH: 2026-11-12 KEGG symbols for KOs whose source label names a whole family
+ko_symbols <- read_lines("data/external/ko00001.keg") |>
+  str_subset("^D\\s+K\\d{5}") |>
+  str_match("^D\\s+(K\\d{5})\\s+([^;]+)") |>
+  as_tibble(.name_repair = ~ c("line", "feature_id", "symbols")) |>
+  distinct(feature_id, .keep_all = TRUE) |>
+  mutate(ko_symbol = map_chr(str_split(symbols, ",\\s*"),
+                             \(s) if (length(s) > 1 && str_detect(s[1], "^E\\d")) s[2] else s[1])) |>
+  select(feature_id, ko_symbol)
+
+multi_ko_features <- panel_ref |>
+  filter(match_type == "ko") |>
+  distinct(gene, feature_id) |>
+  filter(n() > 1, .by = gene) |>
+  pull(feature_id) |> unique()
+
+# one row per feature; a feature in two subcategories (or modes) lists both
+panel_features <- panel_long |>
+  summarise(across(c(category, subcategory, gene),
+                   \(x) paste(sort(unique(as.character(x))), collapse = " | ")),
+            .by = c(feature_id, match_type)) |>
+  mutate(gene_short = str_remove(gene, " \\(.*$")) |>
+  # >SKH: 2026-11-12 a family label that covers several KOs (e.g. TatC and SecY) gives
+  # every KO the same name, so those KOs also show their KEGG symbol
+  left_join(ko_symbols, by = "feature_id") |>
+  mutate(gene_disp = if_else(feature_id %in% multi_ko_features & !is.na(ko_symbol),
+                             paste0(gene_short, ": ", ko_symbol), gene_short),
+         feature_lab = glue("{gene_disp} ({feature_id})")) |>
+  left_join(shared_key, by = "feature_id") |>
+  mutate(primary_category = coalesce(primary_category, category))
+
+panel_summary <- panel_long |>
+  summarise(n_features = n_distinct(feature_id),
+            n_ko = n_distinct(feature_id[match_type == "ko"]),
+            n_pfam = n_distinct(feature_id[match_type == "pfam"]),
+            n_subcategories = n_distinct(subcategory),
+            .by = category) |>
+  complete(category, fill = list(n_features = 0L, n_ko = 0L, n_pfam = 0L,
+                                 n_subcategories = 0L)) |>
+  arrange(category)
+panel_summary
+
+message(glue("{nrow(panel_features)} panel features ",
+             "({sum(panel_features$match_type == 'pfam')} matched by Pfam) | ",
+             "{n_distinct(panel_long$subcategory)} subcategories"))
+```
+
+> For results: features per trophic mode (`06_panel_summary.csv`). A mode with few features is reported gene by gene, not as a category.
+
+# Detection: one call for every panel feature
+
+The paired table holds one row per transcript × KO (multi-KO transcripts split their TPM
+equally, `R/prep_paired.R`). Panel rows are pulled from it twice and stacked: rows whose KO
+is a panel KO, and rows whose Pfam string matches a Pfam-only panel gene. Summing a Pfam
+gene's rows over a transcript's KO splits gives back its full TPM. A transcript that matches
+both a panel KO and a Pfam gene counts toward both features.
+
+Transcripts with no KO are not in the paired table, so Pfam genes are scored only on their
+KO-carrying transcripts. `scripts/QC_pfam_panel_check.R` reports how much expression that
+leaves out (most of phoX and microbial rhodopsin, `qc-pfam-panel-summary.csv`).
+
+>SKH:
+
+```{r panel-detection}
+#| message: true
+paired <- load_paired(fields = FIELDS_IN_SCOPE, depth = CHOSEN_DEPTH)
+
+units <- paired |>
+  distinct(unit = sample_unit, vent_bin, field) |>
+  mutate(habitat = if_else(vent_bin == "Vent", "vent", "nonvent"))
+
+n_units   <- units |> count(habitat) |> deframe()             # nonvent, vent
+min_units <- MIN_UNITS[names(n_units)]                       # 05 rule: 3 of 13 vent, 3 of 6 non-vent
+old_units <- ceiling(OCC_MIN * n_units - 1e-9)                # old 30% rule (4 of 13, 2 of 6), sensitivity only
+stopifnot(!anyNA(min_units))
+message(glue("{n_units[['vent']]} vent and {n_units[['nonvent']]} non-vent units | ",
+             "present = >= {min_units[['vent']]} vent or >= {min_units[['nonvent']]} non-vent units"))
+
+# unit totals from the FULL table, so panel rows share the 05 denominator
+unit_totals <- paired |>
+  mutate(unit = sample_unit) |>
+  summarise(unit_total = sum(scaledTPM) / first(n_reps), .by = c(unit, vent_bin, field))
+
+# all KOs detected per unit: the depth context for B
+ko_detected_per_unit <- unit_expression(paired, "ko_id", MIN_TPM, MIN_PER_MILLION,
+                                        totals = unit_totals) |>
+  summarise(n_ko_detected = sum(detected), .by = unit)
+
+# Pfam-only genes: a PFAMs string maps to a gene when all its domains belong to it
+pfam_genes <- panel_ref |>
+  filter(match_type == "pfam") |>
+  distinct(feature_id, pfam_name) |>
+  mutate(domains = str_split(pfam_name, ";"))
+
+pfam_key <- tibble(PFAMs = character(), feature_id = character())
+if (nrow(pfam_genes)) {
+  pfam_key <- paired |>
+    distinct(PFAMs) |>
+    filter(!is.na(PFAMs), !PFAMs %in% c("", "-")) |>
+    mutate(feature_id = map_chr(PFAMs, \(p) {
+      d   <- str_split_1(p, ",")
+      hit <- pfam_genes$feature_id[map_lgl(pfam_genes$domains, \(f) all(d %in% f))]
+      if (length(hit)) hit[1] else NA_character_
+    })) |>
+    filter(!is.na(feature_id))
+}
+pfam_key |> count(feature_id, name = "n_pfam_strings")
+
+keep_cols <- c("sample_unit", "n_reps", "scaledTPM", "cur_group", "cur_L4")
+panel_kos <- panel_features$feature_id[panel_features$match_type == "ko"]
+
+panel_rows <- bind_rows(
+  paired |> filter(ko_id %in% panel_kos) |> select(all_of(keep_cols), feature_id = ko_id),
+  paired |> inner_join(pfam_key, by = "PFAMs") |> select(all_of(keep_cols), feature_id)
+)
+
+taxon_info <- panel_rows |> distinct(cur_L4, cur_group)
+stopifnot(!anyDuplicated(taxon_info$cur_L4))
+
+# feature x unit, and taxon x feature x unit
+ue_feature <- unit_expression(panel_rows, "feature_id", MIN_TPM, MIN_PER_MILLION,
+                              totals = unit_totals)
+ue_pair    <- unit_expression(panel_rows, c("cur_L4", "feature_id"), MIN_TPM, MIN_PER_MILLION,
+                              totals = unit_totals)
+
+message(glue("{n_distinct(ue_feature$feature_id)} of {nrow(panel_features)} panel features ",
+             "have expression in >= 1 unit; {n_distinct(ue_feature$feature_id[ue_feature$detected])} ",
+             "are detected in >= 1 unit"))
+
+# >SKH: every curated L4 taxon in the paired table, for the full matrix in D (2026-11-08)
+all_taxa <- paired |> distinct(cur_L4, cur_group)
+stopifnot(!anyDuplicated(all_taxa$cur_L4))
+
+rm(paired, panel_rows); invisible(gc())
+```
+
+# B. Feature × sample unit
+
+Every panel feature with expression anywhere, across all 19 units (zero-filled). Units are
+ordered by habitat and field. Detected-feature counts per unit are shown against the number
+of KOs detected in that unit, because a deeper unit clears detection for more features of
+every kind: a unit with few panel detections is first a unit with few detections overall.
+
+>SKH:
+
+```{r unit-detection}
+unit_levels <- units |>
+  arrange(desc(habitat), field, unit) |>
+  pull(unit)
+
+unit_detection <- complete_units(ue_feature, select(units, unit, vent_bin, field), "feature_id") |>
+  left_join(select(units, unit, habitat), by = "unit") |>
+  mutate(per_million = share * 1e6) |>
+  left_join(select(panel_features, feature_id, match_type, category, subcategory, gene),
+            by = "feature_id") |>
+  select(feature_id, match_type, category, subcategory, gene, unit, habitat, vent_bin, field,
+         tpm, per_million, detected)
+
+# per unit and mode: panel features detected, against all KOs detected
+unit_summary <- unit_detection |>
+  filter(detected) |>
+  distinct(unit, feature_id) |>
+  inner_join(distinct(panel_long, feature_id, category), by = "feature_id",
+             relationship = "many-to-many") |>
+  count(unit, category, name = "n_panel_detected", .drop = FALSE) |>
+  complete(unit = units$unit, category, fill = list(n_panel_detected = 0L)) |>
+  left_join(units, by = "unit") |>
+  left_join(ko_detected_per_unit, by = "unit") |>
+  mutate(frac_of_detected_kos = n_panel_detected / n_ko_detected)
+
+unit_summary |>
+  summarise(median_panel = median(n_panel_detected),
+            median_frac  = median(frac_of_detected_kos),
+            .by = c(category, habitat))
+```
+
+```{r fig-unit-detection}
+#| fig-width: 7
+#| fig-height: 24
+ud_df <- unit_detection |>
+  select(-category, -subcategory) |>
+  inner_join(distinct(panel_plot, feature_id, category, subcategory), by = "feature_id",
+             relationship = "many-to-many") |>
+  left_join(select(panel_features, feature_id, feature_lab, shared), by = "feature_id") |>
+  mutate(feature_lab = if_else(shared, paste0(feature_lab, "\u2020"), as.character(feature_lab))) |>
+  mutate(unit = factor(unit, levels = unit_levels),
+         habitat = factor(habitat, levels = c("vent", "nonvent"), labels = c("Vent", "Non-vent")),
+         mode = str_wrap(as.character(category), 14),
+         subcategory = str_wrap(subcategory, 18),
+         call = if_else(detected, as.character(habitat), "Not detected"))
+
+fig_unit_detection <- ggplot(ud_df, aes(unit, feature_lab, fill = call)) +
+  geom_tile(color = "grey20", linewidth = 0.3) +
+  scale_fill_manual(values = c(Vent = presence_pal[["vent_only"]],
+                               `Non-vent` = presence_pal[["nonvent_only"]],
+                               `Not detected` = "white"), name = NULL) +
+  facet_grid(mode + subcategory ~ habitat + field, scales = "free", space = "free") +
+  labs(x = NULL, y = NULL, caption = "\u2020 also in another trophic mode") +
+  theme_minimal(base_size = 7) +
+  theme(panel.grid = element_blank(),
+        legend.position = "top",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, color = "black"),
+        strip.text.y = element_text(angle = 0, hjust = 0, color = "black"))
+fig_unit_detection
+# ggsave("figures/06-panel-unit-detection.svg", fig_unit_detection, width = 6, height = 24)
+```
+
+```{r fig-unit-depth}
+#| fig-width: 9
+#| fig-height: 4
+fig_unit_depth <- unit_summary |>
+  filter(category %in% panel_summary$category[panel_summary$n_features > 0]) |>
+  ggplot(aes(n_ko_detected, n_panel_detected, colour = habitat, shape = habitat)) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = c(vent = presence_pal[["vent_only"]],
+                                 nonvent = presence_pal[["nonvent_only"]]),
+                      labels = c(vent = "Vent", nonvent = "Non-vent"), name = NULL) +
+  scale_shape_manual(values = c(vent = 17, nonvent = 16),          # vent triangle, non-vent circle
+                     labels = c(vent = "Vent", nonvent = "Non-vent"), name = NULL) +
+  facet_wrap(~ category, scales = "free_y", nrow = 1) +
+  labs(x = "KOs detected in the unit", y = "Panel features detected") +
+  theme_bw(base_size = 9)
+fig_unit_depth
+# ggsave("figures/06-panel-unit-depth.svg", fig_unit_depth, width = 9, height = 4)
+```
+
+> For results: panel features detected per unit against all KOs detected per unit (`06_panel_unit_summary.csv`). If panel counts follow the KO count, the unit pattern is depth, not a trophic shift.
+
+# C. Feature × habitat
+
+The same occupancy rule as 05 (`habitat_occupancy()`): associated with a habitat when detected in ≥ 3 of its units (3 of 13 vent, 3 of 6 non-vent); vent-only = never detected in background water, plume detections allowed (2026-11-23). Sections D-F use the same unit counts for presence. `below_filter` features are detected somewhere but clear the rule in neither habitat; `not_detected` features are never detected. For KO features the class must match `05_ko_habitat_class.csv` once 05 has been re-rendered on the same paired table; a mismatch raises a warning.
+
+>SKH:
+
+```{r panel-habitat}
+#| message: true
+panel_occ <- habitat_occupancy(ue_feature, select(units, unit, vent_bin, field),
+                               "feature_id", MIN_UNITS, VENTONLY_TOLERATED)
+
+panel_habitat <- panel_features |>
+  left_join(panel_occ |>
+              transmute(feature_id, n_det_vent, n_det_nonvent, occ_vent, occ_nonvent,
+                        habitat_class = as.character(habitat_class)),
+            by = "feature_id") |>
+  mutate(habitat_class = factor(replace_na(habitat_class, "not_detected"), levels = class_levels),
+         across(c(n_det_vent, n_det_nonvent), \(x) replace_na(x, 0L)),
+         across(c(occ_vent, occ_nonvent), \(x) replace_na(x, 0)))
+
+# KO features against 05 (same rule, same table)
+agreement_05 <- panel_habitat |>
+  filter(match_type == "ko") |>
+  inner_join(read_csv(HABITAT_TABLE, show_col_types = FALSE) |>
+               select(feature_id = ko_id, habitat_class_05 = habitat_class),
+             by = "feature_id") |>
+  summarise(n_compared = n(),
+            n_agree    = sum(as.character(habitat_class) == habitat_class_05))
+agreement_05
+if (agreement_05$n_agree < agreement_05$n_compared) {
+  warning(agreement_05$n_compared - agreement_05$n_agree, " panel KO(s) differ from ",
+          HABITAT_TABLE, ". Re-render 05 on the current paired table.", call. = FALSE)
+}
+
+# per mode; a feature in two modes counts once, under heterotrophy/phagotrophy (dagger)
+panel_habitat_mode <- panel_plot |>
+  distinct(feature_id, category) |>
+  left_join(select(panel_habitat, feature_id, habitat_class), by = "feature_id") |>
+  count(category, habitat_class, .drop = FALSE)
+
+panel_habitat_subcat <- panel_plot |>
+  left_join(select(panel_habitat, feature_id, habitat_class), by = "feature_id") |>
+  count(category, subcategory, habitat_class, .drop = FALSE) |>
+  filter(paste(category, subcategory) %in% paste(panel_plot$category, panel_plot$subcategory)) |>
+  pivot_wider(names_from = habitat_class, values_from = n, values_fill = 0)
+
+panel_habitat_mode |> pivot_wider(names_from = habitat_class, values_from = n, values_fill = 0)
+panel_habitat_subcat
+```
+
+```{r fig-panel-habitat}
+#| fig-width: 8
+#| fig-height: 4
+fig_panel_habitat <- panel_habitat_mode |>
+  ggplot(aes(n, fct_rev(category), fill = habitat_class)) +
+  geom_col(colour = "grey40", linewidth = 0.2) +
+  scale_fill_manual(values = class_pal, name = "Habitat class", drop = FALSE) +
+  labs(x = "Panel features", y = NULL) +
+  theme_bw(base_size = 9)
+fig_panel_habitat
+# ggsave("figures/06-panel-habitat.svg", fig_panel_habitat, width = 8, height = 4)
+```
+
+> For results: features per trophic mode in each habitat class (`06_panel_habitat_mode.csv`),
+> and which subcategories hold the vent-associated ones (`06_panel_habitat_subcategory.csv`).
+
+# D. Taxon × feature × habitat
+
+A taxon carries a panel feature in a habitat when the taxon × feature pair is detected in ≥
+3 of that habitat's units (3 of 13 vent, 3 of 6 non-vent; 05 rule). Each pair is labelled vent only, non-vent only, or both. The
+same call is applied to **all** taxon × KO pairs (`05b_taxon_ko_pairs.csv.gz`) as a
+background, because the vent/non-vent split of pairs is not specific to the panel:
+compare the panel split with the background before reading it as a trophic result.
+
+>SKH:
+
+```{r taxon-presence}
+#| message: true
+# pairs detected in >= 1 unit, with per-habitat unit counts
+pair_counts <- ue_pair |>
+  summarise(n_det_vent    = sum(detected & vent_bin == "Vent"),
+            n_det_nonvent = sum(detected & vent_bin != "Vent"),
+            .by = c(cur_L4, feature_id)) |>
+  filter(n_det_vent + n_det_nonvent > 0)
+
+# vent_min / nonvent_min: units needed in each habitat
+presence_call <- function(df, vent_min, nonvent_min) {
+  df |>
+    mutate(in_vent = n_det_vent >= vent_min, in_nonvent = n_det_nonvent >= nonvent_min) |>
+    filter(in_vent | in_nonvent) |>
+    mutate(presence = factor(case_when(in_vent & in_nonvent ~ "both",
+                                       in_vent ~ "vent_only",
+                                       TRUE ~ "nonvent_only"),
+                             levels = names(presence_lab))) |>
+    select(-in_vent, -in_nonvent)
+}
+
+taxon_presence <- pair_counts |>
+  presence_call(min_units[["vent"]], min_units[["nonvent"]]) |>
+  left_join(taxon_info, by = "cur_L4") |>
+  mutate(taxon = taxon_label_unique(cur_L4)) |>
+  inner_join(panel_long, by = "feature_id", relationship = "many-to-many") |>
+  select(cur_group, cur_L4, taxon, category, subcategory, feature_id, match_type, gene,
+         n_det_vent, n_det_nonvent, presence)
+
+# one row per taxon x feature (subcategory and mode duplicates removed)
+taxon_pairs <- taxon_presence |> distinct(cur_group, cur_L4, taxon, feature_id, presence)
+
+message(glue("{n_distinct(taxon_pairs$feature_id)} of {nrow(panel_features)} panel features carried by ",
+             "{n_distinct(taxon_pairs$cur_L4)} taxa in {nrow(taxon_pairs)} taxon x feature pairs"))
+
+# sensitivity to the rule, panel and background side by side
+rules <- tibble(rule        = c("05 rule (>= 3 units)", "old 30% of units (4 / 2)",
+                                paste0(">= ", SENS_MIN_UNITS, " unit(s)")),
+                vent_min    = c(min_units[["vent"]], old_units[["vent"]], SENS_MIN_UNITS),
+                nonvent_min = c(min_units[["nonvent"]], old_units[["nonvent"]], SENS_MIN_UNITS))
+
+background_pairs <- read_csv(PAIR_TABLE, show_col_types = FALSE) |>
+  select(cur_L4, feature_id = ko_id, n_det_vent, n_det_nonvent)
+
+presence_sensitivity <- pmap_dfr(rules, \(rule, vent_min, nonvent_min) {
+  bind_rows(panel      = presence_call(pair_counts, vent_min, nonvent_min) |> count(presence),
+            background = presence_call(background_pairs, vent_min, nonvent_min) |> count(presence),
+            .id = "pairs") |>
+    mutate(frac = round(n / sum(n), 3), .by = pairs) |>
+    mutate(rule = rule, .before = 1)
+})
+presence_sensitivity
+
+# per taxon and mode: features carried in each habitat state
+taxon_mode_summary <- taxon_presence |>
+  distinct(cur_group, taxon, category, feature_id, presence) |>
+  count(cur_group, taxon, category, presence) |>
+  pivot_wider(names_from = presence, values_from = n, values_fill = 0) |>
+  mutate(n_features = rowSums(across(any_of(names(presence_lab))))) |>
+  arrange(category, desc(n_features))
+taxon_mode_summary |> slice_max(n_features, n = 10, by = category)
+```
+
+> For results: the vent only / non-vent only / both split of panel pairs next to the
+> background split (`06_panel_presence_sensitivity.csv`), and the taxa carrying the most
+> features per mode (`06_panel_taxon_mode_summary.csv`).
+
+## Every panel gene × every L4 taxon
+
+>SKH: added 2026-11-08. Every panel feature, in all four modes, is scored against every
+class-level (curated L4) taxon in the paired table, including the pairs never detected, so
+absence is explicit rather than implied by a missing row. Each taxon × feature pair gets
+one state per panel: *present* (detected in ≥ 3 vent or ≥ 3 non-vent units, the 05 rule; ≥ 6 of
+19 for all samples), *below threshold* (detected in ≥ 1 unit but below that bar), or *absent*
+(no unit). The panels are vent (13 units),
+non-vent (6 units), and all samples (19 units, ≥ 6 for present), so the all-samples panel
+shows how widespread a pattern is across the whole dataset. Descriptive, not tested.
+
+```{r taxon-pa-matrix}
+#| message: true
+n_all   <- sum(n_units)
+min_all <- ceiling(OCC_MIN * n_all - 1e-9)                  # 30% of 19 -> 6
+
+pa_states <- c(present = "Present (>= 3 units; all samples >= 6 of 19)",
+               below_threshold = "Detected, below threshold",
+               absent = "Not detected")
+pa_state <- function(n, min_n) {
+  factor(case_when(n >= min_n ~ "present", n > 0 ~ "below_threshold", TRUE ~ "absent"),
+         levels = names(pa_states))
+}
+
+taxon_pa_matrix <- all_taxa |>
+  mutate(taxon = taxon_label_unique(cur_L4)) |>
+  cross_join(select(panel_features, feature_id, match_type, category, subcategory, gene)) |>
+  left_join(select(pair_counts, cur_L4, feature_id, n_det_vent, n_det_nonvent),
+            by = c("cur_L4", "feature_id")) |>
+  mutate(across(c(n_det_vent, n_det_nonvent), \(x) as.integer(coalesce(x, 0L))),
+         n_det_all   = n_det_vent + n_det_nonvent,
+         frac_all    = round(n_det_all / n_all, 3),
+         vent        = pa_state(n_det_vent, min_units[["vent"]]),
+         nonvent     = pa_state(n_det_nonvent, min_units[["nonvent"]]),
+         all_samples = pa_state(n_det_all, min_all)) |>
+  arrange(cur_group, taxon, feature_id)
+
+# per feature: how many L4 taxa carry it in each panel (breadth across lineages)
+feature_taxon_breadth <- taxon_pa_matrix |>
+  summarise(n_taxa_vent    = sum(vent == "present"),
+            n_taxa_nonvent = sum(nonvent == "present"),
+            n_taxa_all     = sum(all_samples == "present"),
+            n_taxa_any_det = sum(n_det_all > 0),
+            n_groups_all   = n_distinct(cur_group[all_samples == "present"]),
+            .by = c(feature_id, match_type, category, subcategory, gene)) |>
+  arrange(category, desc(n_taxa_all))
+
+message(glue("{nrow(all_taxa)} L4 taxa x {nrow(panel_features)} panel features = ",
+             "{nrow(taxon_pa_matrix)} pairs | present: {sum(taxon_pa_matrix$vent == 'present')} vent, ",
+             "{sum(taxon_pa_matrix$nonvent == 'present')} non-vent, ",
+             "{sum(taxon_pa_matrix$all_samples == 'present')} all samples (>= {min_all} of {n_all})"))
+feature_taxon_breadth |> slice_max(n_taxa_all, n = 5, by = category, with_ties = FALSE)
+```
+
+> For results: per mode, the features carried by the most L4 taxa across all samples, and
+> features present at vents but in no non-vent taxon (`06_panel_feature_taxon_breadth.csv`;
+> full matrix `06_panel_taxon_pa_matrix.csv`).
+
+Figure: features (rows, grouped by mode and subcategory) × L4 taxa (columns, grouped by
+supergroup), in three panels: vent, non-vent, all samples. Taxa shown carry ≥ 1 feature at
+*present* in at least one panel. Heterotrophy/phagotrophy gets its own figure; osmotrophy,
+symbiosis and parasitism share the second.
+
+```{r fig-taxon-pa}
+#| fig-width: 24
+#| fig-height: 24
+grp <- unique(taxon_pa_matrix$cur_group)
+grp_levels <- c(intersect(SUPERGROUP_0_ordering, grp), setdiff(grp, SUPERGROUP_0_ordering))
+
+panel_labels <- c(vent = glue("Vent ({n_units[['vent']]} units)"),
+                  nonvent = glue("Non-vent ({n_units[['nonvent']]} units)"),
+                  all_samples = glue("All samples ({n_all} units)"))
+panel_pal <- list(vent        = c(present = "#b74a70", below_threshold = "#ecd0db", absent = "white"),
+                  nonvent     = c(present = "#346D6E", below_threshold = "#cfe2e2", absent = "white"),
+                  all_samples = c(present = "grey20",  below_threshold = "grey80",  absent = "white"))
+
+# y-axis labels for the taxon presence/absence figures: a trailing * marks features in the
+# protist experimental phagotrophy list (KO or Pfam), and the KO id is bold for KOs in the
+# Burns et al. 2018 families. feature_lab stays the plain key; only the printed label changes.
+burns_ids <- read_csv(SETS_TABLE, show_col_types = FALSE) |>
+  filter(set_source == "burns2018") |> distinct(ko_id) |> pull(ko_id)
+experimental_ids <- read_csv(EXPERIMENTAL, show_col_types = FALSE) |>
+  select(ko_id, pfam_acc) |>
+  pivot_longer(everything(), values_to = "id") |>
+  separate_longer_delim(id, ";") |>
+  mutate(id = str_squish(id)) |>
+  filter(!is.na(id), id != "") |>
+  distinct(id) |> pull(id)
+
+feature_label_fun <- function(x) {
+  hit <- panel_features[match(x, panel_features$feature_lab), ]
+  lapply(seq_along(x), \(i) {
+    gene <- hit$gene_disp[i]; id <- hit$feature_id[i]
+    star <- paste0(if (id %in% experimental_ids) "*" else "",
+                   if (isTRUE(hit$shared[i])) "\u2020" else "")
+    if (id %in% burns_ids) bquote(paste(.(gene), " (", bold(.(id)), ")", .(star)))
+    else                   bquote(paste(.(gene), " (", .(id), ")", .(star)))
+  }) |> as.expression()
+}
+pa_caption <- paste("* protist phagotrophy experimental gene; bold KO id = Burns et al. 2018 family;",
+                    "\u2020 also in another trophic mode")
+
+plot_taxon_pa <- function(modes, base_size = 6, min_taxa = NULL, min_taxa_modes = modes,
+                          split_tiles = FALSE) {
+  df <- taxon_pa_matrix |>
+    select(cur_group, cur_L4, taxon, feature_id, vent, nonvent, all_samples) |>
+    inner_join(panel_plot |> filter(category %in% modes) |>
+                 distinct(feature_id, category, subcategory),
+               by = "feature_id", relationship = "many-to-many") |>
+    left_join(select(panel_features, feature_id, feature_lab), by = "feature_id")
+
+  # min_taxa: keep features called present (all-samples panel) in >= min_taxa L4 taxa;
+  # NULL keeps every panel feature. Applied to every mode in the plot unless
+  # min_taxa_modes names a subset (>SKH: 2026-11-12, was heterotrophy only).
+  if (!is.null(min_taxa)) {
+    kept_features <- df |>
+      filter(all_samples == "present") |>
+      distinct(feature_id, cur_L4) |>
+      count(feature_id) |>
+      filter(n >= min_taxa)
+    df <- df |>
+      filter(!category %in% min_taxa_modes | feature_id %in% kept_features$feature_id)
+  }
+
+  shown_taxa <- df |>
+    filter(vent == "present" | nonvent == "present" | all_samples == "present") |>
+    distinct(cur_L4) |> pull()
+  feature_order <- df |>
+    summarise(n = sum(all_samples == "present"), .by = feature_lab) |>
+    arrange(n) |> pull(feature_lab)
+  taxon_order <- df |>
+    filter(cur_L4 %in% shown_taxa) |>
+    summarise(n = sum(all_samples == "present"), .by = taxon) |>
+    arrange(desc(n)) |> pull(taxon)
+
+  df <- df |>
+    filter(cur_L4 %in% shown_taxa) |>
+    mutate(cur_group   = factor(cur_group, levels = grp_levels),
+           taxon       = factor(taxon, levels = taxon_order),
+           feature_lab = factor(feature_lab, levels = feature_order),
+           mode        = str_wrap(as.character(category), 12),
+           subcategory = str_wrap(subcategory, 18))
+
+  # split tiles: one panel, each tile cut on the bottom-left to top-right diagonal;
+  # vent = top-left triangle, non-vent = bottom-right triangle.
+  # Polygons sit on a discrete axis set by an invisible geom_tile(), so free facet scales
+  # still collapse to the taxa/features present in each facet. Triangle coordinates use
+  # each tile's position *within its facet* (rank among levels present there).
+  if (split_tiles) {
+    split_pal <- c(setNames(panel_pal$vent,    paste0("vent.",    names(panel_pal$vent))),
+                   setNames(panel_pal$nonvent, paste0("nonvent.", names(panel_pal$nonvent))))
+    split_labs <- c(vent.present = "Vent: present", vent.below_threshold = "Vent: below threshold",
+                    vent.absent = "Vent: absent", nonvent.present = "Non-vent: present",
+                    nonvent.below_threshold = "Non-vent: below threshold",
+                    nonvent.absent = "Non-vent: absent")
+    df <- df |>
+      mutate(px = dense_rank(as.integer(taxon)),       .by = cur_group) |>
+      mutate(py = dense_rank(as.integer(feature_lab)), .by = c(mode, subcategory))
+    poly <- bind_rows(mutate(df, half = "vent",    state = as.character(vent)),
+                      mutate(df, half = "nonvent", state = as.character(nonvent))) |>
+      mutate(tile_id = row_number(), key = paste(half, state, sep = ".")) |>
+      cross_join(tibble(v = 1:3)) |>
+      mutate(ox = if_else(half == "vent", c(-.5, -.5, .5)[v], c(-.5, .5, .5)[v]),
+             oy = if_else(half == "vent", c(-.5, .5, .5)[v], c(-.5, -.5, .5)[v]),
+             x = px + ox, y = py + oy)
+
+    return(
+      ggplot() +
+        geom_tile(data = df, aes(taxon, feature_lab), fill = NA, colour = NA) +
+        geom_polygon(data = poly, aes(x, y, group = tile_id, fill = key),
+                     color = "grey70", linewidth = 0.1) +
+        scale_fill_manual(values = split_pal, labels = split_labs, drop = FALSE, name = NULL) +
+        scale_y_discrete(labels = feature_label_fun) +
+        facet_grid(mode + subcategory ~ cur_group, scales = "free", space = "free") +
+        labs(x = NULL, y = NULL, title = "Vent (top left) | Non-vent (bottom right)",
+             caption = pa_caption) +
+        theme_minimal(base_size = base_size) +
+        theme(panel.grid = element_blank(),
+              legend.position = "bottom",
+              axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, color = "black"),
+              strip.text.x = element_text(angle = 90, hjust = 0, size = base_size - 1, color = "black"),
+              strip.text.y = element_text(angle = 0, hjust = 0, size = base_size - 1, color = "black"))
+    )
+  }
+
+  one_panel <- function(which, show_y) {
+    ggplot(df, aes(taxon, feature_lab, fill = .data[[which]])) +
+      geom_tile(color = "grey70", linewidth = 0.1) +
+      scale_fill_manual(values = panel_pal[[which]], labels = pa_states, drop = FALSE,
+                        name = panel_labels[[which]]) +
+      scale_y_discrete(labels = feature_label_fun) +
+      facet_grid(mode + subcategory ~ cur_group, scales = "free", space = "free") +
+      labs(x = NULL, y = NULL, title = panel_labels[[which]]) +
+      theme_minimal(base_size = base_size) +
+      theme(panel.grid = element_blank(),
+            legend.position = "bottom", legend.direction = "vertical",
+            axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, color = "black"),
+            axis.text.y = if (show_y) element_text() else element_blank(),
+            strip.text.x = element_text(angle = 90, hjust = 0, size = base_size - 1, color = "black"),
+            strip.text.y = element_text(angle = 0, hjust = 0, size = base_size - 1, color = "black"))
+  }
+
+  one_panel("vent", TRUE) + one_panel("nonvent", FALSE) + one_panel("all_samples", FALSE) +
+    plot_layout(nrow = 1) + plot_annotation(caption = pa_caption)
+}
+
+fig_pa_heterotrophy <- plot_taxon_pa("Heterotrophy/phagotrophy")
+fig_pa_heterotrophy
+# ggsave("figures/06-panel-taxon-pa-heterotrophy.svg", fig_pa_heterotrophy, width = 30, height = 34)
+```
+
+```{r fig-taxon-pa-detected}
+#| fig-width: 26
+#| fig-height: 7
+fig_pa_heterotrophy_detected <- plot_taxon_pa("Heterotrophy/phagotrophy", min_taxa = 2)
+fig_pa_heterotrophy_detected
+# ggsave("figures/06-panel-taxon-pa-heterotrophy-detected.svg", fig_pa_heterotrophy_detected, width = 30, height = 34)
+```
+
+```{r fig-taxon-pa-split}
+#| fig-width: 17
+#| fig-height: 7
+fig_pa_heterotrophy_split <- plot_taxon_pa("Heterotrophy/phagotrophy", min_taxa = 3,
+                                           split_tiles = TRUE)
+fig_pa_heterotrophy_split
+# ggsave("figures/06-panel-taxon-pa-heterotrophy-split.svg", fig_pa_heterotrophy_split, width = 17, height = 7)
+```
+
+```{r fig-taxon-pa-other}
+#| fig-width: 15
+#| fig-height: 6
+fig_pa_other <- plot_taxon_pa(c("Osmotrophy", "Symbiosis", "Parasitism"), min_taxa = 1,
+                                           split_tiles = TRUE)
+fig_pa_other
+# ggsave("figures/06-panel-taxon-pa-osmo-sym-par.svg", fig_pa_other, width = 15, height = 6)
+```
+
+```{r fig-trophic-panel-result}
+#| fig-width: 17
+#| fig-height: 7
+
+
+```
+
+
+
+# Lineage inputs (E and F)
+
+All taxon × KO pairs from 05b, kept when present in either habitat under the same rule as D (>= 3 units). KO names come from `data/gene-lists/trophic_gene_sets.csv` (`scripts/00_build_gene_sets.R`).
+
+>SKH: the pair filter changed from ">= 2 units in either habitat" to the 30% rule on 2026-11-08.
+
+```{r read-inputs}
+pairs <- read_csv(PAIR_TABLE, show_col_types = FALSE) |>
+  mutate(phylum    = str_squish(str_extract(cur_phylum, "[^;]+$")),
+         lineage   = str_squish(str_extract(cur_L4, "[^;]+$")),
+         tpm_total = tpm_vent + tpm_nonvent) |>
+  filter(n_det_vent >= min_units[["vent"]] | n_det_nonvent >= min_units[["nonvent"]])
+
+trophic_sets <- read_csv(SETS_TABLE, show_col_types = FALSE)
+experimental <- read_csv(EXPERIMENTAL, show_col_types = FALSE)
+ko_hab       <- read_csv(HABITAT_TABLE, show_col_types = FALSE)
+
+message(glue("{nrow(pairs)} lineage x KO pairs | {n_distinct(pairs$cur_L4)} lineages | ",
+             "{n_distinct(pairs$ko_id)} KOs"))
+```
+
+# E. Experimental phagotrophy genes
+
+One row per gene × KO. `n_lineages` counts class-level lineages with a present pair;
+`top_lineages` lists up to five, highest summed scaledTPM first. `in_vent_universe` is
+whether 07 ranks the KO at all; `habitat_class` is the KO's 05 class.
+
+```{r experimental-detection}
+ko_names <- trophic_sets |> distinct(ko_id, ko_name)
+
+experimental_detection <- experimental |>
+  separate_longer_delim(ko_id, ";") |>
+  mutate(ko_id = na_if(str_squish(ko_id), "")) |>
+  left_join(ko_names, by = "ko_id") |>
+  left_join(pairs |>
+              summarise(n_lineages   = n_distinct(cur_L4),
+                        top_lineages = paste(head(lineage[order(-tpm_total)], 5), collapse = " | "),
+                        .by = ko_id),
+            by = "ko_id") |>
+  left_join(ko_hab |> select(ko_id, habitat_class), by = "ko_id") |>
+  mutate(n_lineages       = replace_na(n_lineages, 0L),
+         in_vent_universe = habitat_class %in% VENT_ASSOCIATED) |>
+  select(gene_label, organism, ko_id, ko_name, n_lineages, top_lineages,
+         in_vent_universe, habitat_class, evidence, citation)
+
+experimental_detection
+```
+
+> For results: how many experimental KOs are detected, how many enter the vent-associated samples, and which lineages carry them (`06_experimental_ko_detection.csv`).
+
+# F. Lineage contrasts
+
+## Lineage groups
+
+Fixed before looking at the data, from the literature; edit `lineage_groups` to change
+membership. Each contrast compares lineages with a documented lifestyle (`focal`) against
+free-living relatives in the same phylum (`reference`). Lineages not listed (e.g.
+"(unres.)" bins, *Mesodinium*) stay out of both sides.
+
+* **Ciliates.** Armophorea, Muranotrichea and Parablepharismea form a clade of obligate
+  anaerobes that all host prokaryotic symbionts (Rotterová et al. 2020, *Curr Biol*
+  30:2037–2050); Plagiopylea are anaerobic ciliates with prokaryotic symbionts (Fenchel et
+  al. 1977, *J Protozool* 24:154–163), including a denitrifying endosymbiont (Graf et al.
+  2021, *Nature* 591:445–450).
+* **Syndiniales.** Parasitoids of other protists (John et al. 2019, *Sci Adv* 5:eaav1110;
+  Farhat et al. 2018, *Front Microbiol* 9:2251), against free-living dinoflagellate
+  lineages. Dinophyceae includes mixotrophs and a few parasites, so the reference is not
+  purely free-living.
+* **Myzozoa.** Apicomplexans, gregarines, squirmids and perkinsids (parasites) against
+  chromerids and colpodellids (free-living photosynthetic or predatory relatives;
+  Woo et al. 2015, *eLife* 4:e06974; Mathur et al. 2019, *Curr Biol* 29:2936–2941; Leander
+  et al. 2003, *J Eukaryot Microbiol* 50:334–340; Hoppenrath and Leander 2009,
+  *J Eukaryot Microbiol* 56:251–256).
+
+The QC chunk checks that no `cur_L4` sits on both sides of a contrast. "Dinophyceae" can
+appear on both sides by name only, as two curated lineages (one under Syndiniales, one
+under Dinophyta).
+
+```{r lineage-groups}
+ciliate_reference <- c("Colpodea", "Heterotrichea", "Litostomatea", "Nassophorea",
+                       "Oligohymenophorea", "Phyllopharyngea", "Prostomatea", "Spirotrichea")
+myzozoa_parasite  <- c("Aconoidasia", "Apicomplexa (unres.)", "Ancora", "Cardiosporidium",
+                       "Cephaloidophora", "Digyalum", "Eleutheroschizon", "Filipodium",
+                       "Hammondia", "Lankesteria", "Platyproteum", "Polyplicarium",
+                       "Rhytidocystis", "Selenidium", "Siedleckia", "Squirmida (unres.)",
+                       "Perkinsea (unres.)", "Perkinsida")
+myzozoa_freeliving <- c("Alphamonadaceae", "Chromeraceae", "Chromerida_X", "Colpodellaceae",
+                        "Colpodellida (unres.)", "Colponema", "Colponemidia (unres.)",
+                        "Vitrellaceae")
+
+lineage_groups <- bind_rows(
+  tibble(contrast = "Ciliates: anaerobic, symbiont-bearing vs. other classes",
+         phylum = "Alveolata-Ciliophora", role = "focal",
+         lineage = c("Armophorea", "Muranotrichea", "Parablepharismea", "Plagiopylea")),
+  tibble(contrast = "Ciliates: anaerobic, symbiont-bearing vs. other classes",
+         phylum = "Alveolata-Ciliophora", role = "reference", lineage = ciliate_reference),
+  # Syndiniales: every lineage of the curated Syndiniales phylum, plus Amoebophryaceae
+  # wherever the curation placed it
+  pairs |> filter(phylum == "Alveolata-Syndiniales") |> distinct(phylum, lineage) |>
+    mutate(contrast = "Syndiniales vs. free-living dinoflagellates", role = "focal"),
+  tibble(contrast = "Syndiniales vs. free-living dinoflagellates",
+         phylum = "Alveolata-Dinophyta", role = "focal", lineage = "Amoebophryaceae"),
+  tibble(contrast = "Syndiniales vs. free-living dinoflagellates",
+         phylum = "Alveolata-Dinophyta", role = "reference",
+         lineage = c("Dinophyceae", "Noctilucales", "Oxyrrhinales")),
+  tibble(contrast = "Myzozoa: parasites vs. free-living relatives",
+         phylum = "Alveolata-Myzozoa", role = "focal", lineage = myzozoa_parasite),
+  tibble(contrast = "Myzozoa: parasites vs. free-living relatives",
+         phylum = "Alveolata-Myzozoa", role = "reference", lineage = myzozoa_freeliving))
+
+stopifnot(!anyDuplicated(lineage_groups[c("contrast", "phylum", "lineage")]))
+
+grouped_pairs <- pairs |>
+  inner_join(lineage_groups, by = c("phylum", "lineage"), relationship = "many-to-many")
+
+# KO pool per side: union of member lineages, weight = summed scaledTPM
+pools <- grouped_pairs |>
+  summarise(weight     = pmax(sum(tpm_total), 1e-9),   # a present pair always counts
+            n_lineages = n_distinct(cur_L4), .by = c(contrast, role, ko_id))
+
+pool_sizes <- pools |>
+  summarise(n_kos = n_distinct(ko_id), .by = c(contrast, role)) |>
+  left_join(grouped_pairs |> summarise(lineages = paste(sort(unique(lineage)), collapse = ", "),
+                                       .by = c(contrast, role)),
+            by = c("contrast", "role"))
+
+pool_sizes
+```
+
+Listed lineages that are absent from `pool_sizes` had no present pair.
+
+# Write tables
+
+```{r write}
+write_csv(panel_summary,          "output-tables/06_panel_summary.csv")
+write_csv(unit_detection,         "output-tables/06_panel_unit_detection.csv")
+write_csv(unit_summary,           "output-tables/06_panel_unit_summary.csv")
+write_csv(panel_habitat,          "output-tables/06_panel_habitat.csv")          # read by 07
+write_csv(panel_habitat_mode,     "output-tables/06_panel_habitat_mode.csv")
+write_csv(panel_habitat_subcat,   "output-tables/06_panel_habitat_subcategory.csv")
+write_csv(taxon_presence,         "output-tables/06_panel_taxon_presence.csv")
+write_csv(presence_sensitivity,   "output-tables/06_panel_presence_sensitivity.csv")
+write_csv(taxon_mode_summary,     "output-tables/06_panel_taxon_mode_summary.csv")
+write_csv(taxon_pa_matrix,        "output-tables/06_panel_taxon_pa_matrix.csv")
+write_csv(feature_taxon_breadth,  "output-tables/06_panel_feature_taxon_breadth.csv")
+write_csv(experimental_detection, "output-tables/06_experimental_ko_detection.csv")
+write_csv(pool_sizes,             "output-tables/06_lineage_contrast_pools.csv")
+```
+
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

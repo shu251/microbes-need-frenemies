@@ -1,0 +1,513 @@
+---
+title: "08 — Sensitivity of the vent-only signature to depth, threshold and field"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: show
+    df-print: paged
+---
+
+<!-- >SKH: 2026-11-16 new standalone script (approved by Sarah 2026-11-16; not in _quarto.yml render list).
+     Merges the 05c lineage-sensitivity draft with the depth-matched panel-vs-background test.
+     Standalone: reads paired_L4.RData (02) and tables from 00c, 05, 05b; changes nothing upstream. -->
+
+# Outline
+
+Vent units are about 6x shallower than non-vent units (median retained expression ~177 k
+vs ~1.0 M scaledTPM; `05_depth_check.csv`), vent-only allows plume but no
+background detections (2026-11-23), and most vent-only features sit at the occupancy floor (05b: 78% of the 103
+vent-only lineage-resolved KOs in 4–5 of 13 vent units). This script asks whether the
+vent-only signature changes when depth, the occupancy bar, or the set of vent fields
+changes, and whether the trophic-mode panel responds differently from the background.
+
+1. **Check.** Unsubsampled calls reproduce 05 (KO classes) and 05b (pair classes).
+2. **Depth x threshold.** Subsample units `N_DRAWS` times under three depth schemes, and
+   classify at seven presence rules (20/30/40/50% of units, >= 3 (the 05 rule), >= 2, >= 1 unit).
+3. **Panel vs background.** At each scheme x rule, the panel's vent-only fraction against
+   all KOs, and against `N_NULL_SETS` random KO sets of the panel's size.
+4. **Lineage headline (05b).** Vent-only lineage-resolved KOs, the share carried by
+   lineages present in both habitats, and how many of the 05b vent-only pairs keep their class.
+5. **Leave one vent field out.**
+
+**Two levels, one classifier.** Community = KO; lineage = class-level taxon x KO pair.
+Both use `classify_habitat()` (05/05b): vent-only = vent-associated and never detected in
+background water (plume detections allowed, 2026-11-23); vent-skewed = vent-associated,
+detected in background but below the non-vent bar. The 05 rule is >= 3 units per habitat.
+
+**Depth schemes.**
+
+* `none`: integer pseudo-counts, no subsampling (baseline for the draws).
+* `nonvent_to_vent` (primary): each non-vent unit is subsampled to a depth drawn without
+  replacement from the 13 vent unit depths; vent units are untouched, so the non-vent depth
+  distribution matches the vent one.
+* `common_vent_median`: units above the vent median depth are subsampled to it.
+* `common_min`: all units subsampled to the shallowest unit (the 05 rarefied check). At
+  that depth the per-million floor is < 1 read, so detection = >= 1 read, as in 05 and 05c.
+
+_Expectation to state up front_: subsampling non-vent units can only remove non-vent
+detections, so vent-only counts rise for every KO set by construction. The test is whether
+the **panel** rises more than the background, not whether vent-only rises.
+
+_Detection after subsampling_: the 05 rule (>= 1 count and >= 10 per million) on the
+subsampled counts, per million of each unit's subsampled total. ScaledTPM is scaled to
+library size (Soneson, Love & Robinson 2015, *F1000Research* 4:1521), so rounded values are
+treated as pseudo-counts. Rarefying is the standard control for uneven effort when
+presence/absence is compared (Schloss 2024, *mSphere* 9:e00354-23; Weiss et al. 2017,
+*Microbiome* 5:27).
+
+# Set up
+
+```{r setup}
+#| message: false
+#| warning: false
+source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R")
+```
+
+```{r params}
+FIELDS_IN_SCOPE <- c("Gorda Ridge", "Von Damm", "Piccard")
+CHOSEN_DEPTH <- 4
+MIN_TPM <- params$detect_min_tpm                 # 1
+MIN_PER_MILLION <- params$detect_min_per_million # 10
+OCC_SWEEP <- c(0.20, 0.30, 0.40, 0.50)           # fraction rules
+MIN_UNITS_SWEEP <- c(3, 2, 1)                    # fixed-count rules (as in 06)
+# 05 rule (2026-11-23): >= 3 units in each habitat; vent-only tolerates plume detections
+stopifnot(params$vent_min_units == params$nonvent_min_units)
+REF_RULE <- paste0(">= ", params$vent_min_units, " unit(s)")
+VENTONLY_TOLERATED <- params$ventonly_tolerated_tokens  # "Plume"
+
+N_DRAWS <- 100      # subsampling draws per scheme (05 used 20)
+N_NULL_SETS <- 999  # random KO sets for the panel null
+SCHEMES <- c("none", "nonvent_to_vent", "common_vent_median", "common_min")
+ROBUST <- 0.8       # vent-only in >= this share of draws = robust
+
+PANEL_TABLE     <- "data/gene-lists/gene_candidates_central.csv" # 00c
+KO_HAB_TABLE    <- "output-tables/05_ko_habitat_class.csv"       # 05
+TAXON_TABLE     <- "output-tables/05_taxon_habitat.csv"          # 05
+PAIR_HAB_TABLE  <- "output-tables/05b_taxon_ko_habitat.csv"      # 05b (classified pairs)
+PAIR_DET_TABLE  <- "output-tables/05b_taxon_ko_pairs.csv.gz"     # 05b (all detected pairs)
+```
+
+```{r data}
+#| message: true
+paired <- load_paired(fields = FIELDS_IN_SCOPE, depth = CHOSEN_DEPTH)
+
+units <- paired |>
+  distinct(unit = sample_unit, vent_bin, field) |>
+  arrange(vent_bin, field, unit)
+n_units <- units |> count(vent_bin) |> deframe()   # Non-vent, Vent
+stopifnot(n_units[["Vent"]] == 13, n_units[["Non-vent"]] == 6)
+
+# taxon x KO per unit is the finest grain; KO totals are sums over it
+pair_unit <- unit_expression(paired, c("cur_L4", "ko_id"), MIN_TPM, MIN_PER_MILLION)
+ko_unit   <- unit_expression(paired, "ko_id", MIN_TPM, MIN_PER_MILLION)
+rm(paired)
+
+# KO-matched panel features (Pfam-only panel features are not tested here)
+panel_kos <- read_csv(PANEL_TABLE, show_col_types = FALSE) |>
+  filter(!is.na(subcategory), status != "unresolved", match_type == "ko") |>
+  distinct(feature_id) |>
+  pull(feature_id) |>
+  intersect(unique(ko_unit$ko_id))
+
+ko_universe <- tibble(ko_id = sort(unique(ko_unit$ko_id)))
+
+# lineage habitat class (05) and reference pair classes (05b), held fixed throughout
+tax_hab   <- read_csv(TAXON_TABLE, show_col_types = FALSE) |>
+  select(cur_L4, taxon_habitat = habitat_class)
+ref_pairs <- read_csv(PAIR_HAB_TABLE, show_col_types = FALSE) |>
+  select(cur_L4, ko_id, ref_class = habitat_class)
+ref_vo    <- ref_pairs |> filter(ref_class == "vent_only")
+
+message(glue("{nrow(ko_universe)} KOs ({length(panel_kos)} panel) | ",
+             "{nrow(ref_vo)} vent-only lineage-resolved KOs in 05b"))
+```
+
+# Rules and classification
+
+Each rule is written as unit counts per habitat, so every rule (and every leave-one-field-out
+subset) goes through the same `classify_habitat()` used in 05 and 05b.
+
+```{r rules}
+min_count <- \(frac, n) ceiling(frac * n - 1e-9)
+
+make_rules <- function(n_vent, n_nonvent) {
+  bind_rows(
+    tibble(rule = paste0(100 * OCC_SWEEP, "% of units"),
+           vent_min = min_count(OCC_SWEEP, n_vent), nonvent_min = min_count(OCC_SWEEP, n_nonvent)),
+    tibble(rule = paste0(">= ", MIN_UNITS_SWEEP, " unit(s)"),
+           vent_min = MIN_UNITS_SWEEP, nonvent_min = MIN_UNITS_SWEEP)) |>
+    mutate(rule = fct_inorder(rule))
+}
+rules <- make_rules(n_units[["Vent"]], n_units[["Non-vent"]])
+rules
+
+classify_counts <- function(n_det_vent, n_det_nonvent, n_det_background, vent_min, nonvent_min) {
+  classify_habitat(n_det_vent, n_det_nonvent, n_det_background, vent_min, nonvent_min)
+}
+
+count_detections <- function(ue, by) {
+  ue |>
+    summarise(n_det_vent    = sum(detected & vent_bin == "Vent"),
+              n_det_nonvent = sum(detected & vent_bin != "Vent"),
+              n_det_background = sum(detected & vent_bin != "Vent" &
+                                       !ventonly_tolerated(unit, vent_bin, VENTONLY_TOLERATED)),
+              .by = all_of(by))
+}
+```
+
+# 1. Check: unsubsampled calls reproduce 05 and 05b
+
+```{r reproduce}
+rule_30 <- filter(rules, rule == REF_RULE)   # the 05 rule (name kept from the 30% era)
+
+obs_ko <- count_detections(ko_unit, "ko_id") |>
+  mutate(habitat_class = classify_counts(n_det_vent, n_det_nonvent, n_det_background,
+                                         rule_30$vent_min, rule_30$nonvent_min))
+check_05 <- read_csv(KO_HAB_TABLE, show_col_types = FALSE) |>
+  select(ko_id, class_05 = habitat_class) |>
+  full_join(obs_ko, by = "ko_id")
+
+obs_pair <- count_detections(pair_unit, c("cur_L4", "ko_id")) |>
+  filter(n_det_vent + n_det_nonvent > 0) |>
+  mutate(habitat_class = classify_counts(n_det_vent, n_det_nonvent, n_det_background,
+                                         rule_30$vent_min, rule_30$nonvent_min))
+check_05b_det <- read_csv(PAIR_DET_TABLE, show_col_types = FALSE) |>
+  select(cur_L4, ko_id, v05b = n_det_vent, n05b = n_det_nonvent) |>
+  full_join(obs_pair, by = c("cur_L4", "ko_id"))
+check_05b_cls <- ref_pairs |>
+  left_join(obs_pair, by = c("cur_L4", "ko_id"))
+
+stopifnot(
+  !anyNA(check_05$class_05), !anyNA(check_05$habitat_class),
+  all(as.character(check_05$habitat_class) == check_05$class_05),
+  !anyNA(check_05b_det$v05b), !anyNA(check_05b_det$n_det_vent),
+  all(check_05b_det$n_det_vent == check_05b_det$v05b),
+  all(check_05b_det$n_det_nonvent == check_05b_det$n05b),
+  all(as.character(check_05b_cls$habitat_class) == check_05b_cls$ref_class),
+  sum(obs_pair$habitat_class == "vent_only") == nrow(ref_vo))
+```
+
+# 2. Subsampling
+
+```{r subsample-setup}
+# integer pseudo-counts at the pair grain
+# >SKH: 2026-11-21 floor(), not round(): count >= 1 then equals 05's tpm >= 1, so the
+# 'none' scheme reproduces 05b (round() let 0.5-1 TPM pairs through: 149 vs 103 vent-only)
+pair_counts <- pair_unit |>
+  transmute(unit, vent_bin, cur_L4, ko_id, count = as.integer(floor(tpm))) |>
+  filter(count > 0)
+
+unit_depth <- pair_counts |> summarise(depth = sum(count), .by = c(unit, vent_bin))
+# 05's per-million denominator (all retained expression of the unit), per pseudo-count
+unit_ref <- pair_unit |>
+  distinct(unit, unit_total_05 = unit_total) |>
+  left_join(select(unit_depth, unit, depth), by = "unit")
+vent_depths <- unit_depth$depth[unit_depth$vent_bin == "Vent"]
+unit_depth |>
+  summarise(n = n(), min = min(depth), median = median(depth), max = max(depth), .by = vent_bin)
+
+# draw without replacement from a unit's pseudo-counts (what vegan::rrarefy does per row)
+subsample_counts <- function(counts, depth) {
+  if (depth >= sum(counts)) return(counts)
+  tabulate(sample(rep.int(seq_along(counts), counts), depth), nbins = length(counts))
+}
+
+draw_targets <- function(scheme) {
+  d  <- mutate(unit_depth, target = depth)
+  nv <- d$vent_bin != "Vent"
+  if (scheme == "nonvent_to_vent")
+    d$target[nv] <- pmin(d$depth[nv], sample(vent_depths, sum(nv)))
+  if (scheme == "common_vent_median") d$target <- pmin(d$depth, round(median(vent_depths)))
+  if (scheme == "common_min")         d$target <- pmin(d$depth, min(d$depth))
+  d
+}
+
+subsample_table <- function(scheme) {
+  if (scheme == "none") return(pair_counts)
+  pair_counts |>
+    left_join(select(draw_targets(scheme), unit, target), by = "unit") |>
+    mutate(count = subsample_counts(count, first(target)), .by = unit) |>
+    filter(count > 0) |>
+    select(-target)
+}
+
+# 05's detection rule on (subsampled) counts. >SKH: 2026-11-21 the per-million
+# denominator is 05's unit total scaled by the share of pseudo-counts kept, not the sum of
+# pair counts (which omits expression outside the pair table and loosened the floor)
+detect_counts <- function(sub, by) {
+  kept <- sub |>
+    summarise(unit_total = sum(count), .by = unit) |>
+    left_join(unit_ref, by = "unit") |>
+    mutate(denom = unit_total_05 * unit_total / depth) |>
+    select(unit, unit_total, denom)
+  sub |>
+    summarise(count = sum(count), .by = all_of(c("unit", "vent_bin", by))) |>
+    left_join(kept, by = "unit") |>
+    mutate(detected = count >= MIN_TPM & count / denom * 1e6 >= MIN_PER_MILLION) |>
+    select(-denom)
+}
+```
+
+Random KO sets for the null, fixed once and reused in every draw, drawn from non-panel KOs.
+
+```{r null-sets}
+set.seed(params$seed)
+pool_idx <- which(!ko_universe$ko_id %in% panel_kos)
+null_sets <- Matrix::sparseMatrix(
+  i = rep(seq_len(N_NULL_SETS), each = length(panel_kos)),
+  j = unlist(map(seq_len(N_NULL_SETS), \(s) sample(pool_idx, length(panel_kos)))),
+  x = 1, dims = c(N_NULL_SETS, nrow(ko_universe)))
+```
+
+```{r tally-functions}
+# classify KOs and pairs under one rule; per-KO tallies for the set summaries
+classify_rule <- function(ko_det, pair_det, vent_min, nonvent_min) {
+  ko <- ko_universe |>
+    left_join(ko_det, by = "ko_id") |>
+    replace_na(list(n_det_vent = 0L, n_det_nonvent = 0L, n_det_background = 0L)) |>
+    mutate(class = classify_counts(n_det_vent, n_det_nonvent, n_det_background, vent_min, nonvent_min))
+  pair <- pair_det |>
+    mutate(class = classify_counts(n_det_vent, n_det_nonvent, n_det_background, vent_min, nonvent_min)) |>
+    filter(class != "below_filter")
+  per_ko <- ko |>
+    transmute(ko_id,
+              c_vo = as.numeric(class == "vent_only"),
+              c_va = as.numeric(class %in% c("vent_only", "vent_skewed")),
+              c_n  = as.numeric(class != "below_filter")) |>
+    left_join(pair |> summarise(l_vo = sum(class == "vent_only"), l_n = n(), .by = ko_id),
+              by = "ko_id") |>
+    replace_na(list(l_vo = 0, l_n = 0))
+  list(per_ko = per_ko, pair_vo = filter(pair, class == "vent_only") |> select(cur_L4, ko_id))
+}
+
+# panel, background (all KOs) and null fractions at each level
+set_summary <- function(per_ko) {
+  is_panel <- per_ko$ko_id %in% panel_kos
+  levels <- list(community_vent_only  = c("c_vo", "c_n"),
+                 community_vent_assoc = c("c_va", "c_n"),
+                 lineage_vent_only    = c("l_vo", "l_n"))
+  map_dfr(levels, \(cols) {
+    num <- per_ko[[cols[1]]]
+    den <- per_ko[[cols[2]]]
+    frac_panel <- sum(num[is_panel]) / sum(den[is_panel])
+    null_frac  <- as.vector(null_sets %*% num) / as.vector(null_sets %*% den)
+    tibble(n_panel = sum(num[is_panel]), d_panel = sum(den[is_panel]), frac_panel,
+           n_bg = sum(num), d_bg = sum(den), frac_bg = sum(num) / sum(den),
+           null_median = median(null_frac, na.rm = TRUE),
+           null_pctile = mean(null_frac <= frac_panel, na.rm = TRUE))
+  }, .id = "level")
+}
+
+# 05b headline for one set of vent-only pairs (count-based; tpm_vent optional)
+lineage_headline <- function(pair_vo) {
+  vo <- pair_vo |>
+    left_join(tax_hab, by = "cur_L4") |>
+    left_join(ref_pairs, by = c("cur_L4", "ko_id"))
+  tibble(n_vent_only = nrow(vo),
+         n_vent_only_panel = sum(vo$ko_id %in% panel_kos),
+         frac_on_shared_lineages = mean(vo$taxon_habitat %in% "shared"),
+         expr_on_shared_lineages = if ("tpm_vent" %in% names(vo))
+           sum(vo$tpm_vent[vo$taxon_habitat %in% "shared"]) / sum(vo$tpm_vent) else NA_real_,
+         n_kept_from_05b = sum(vo$ref_class %in% "vent_only"))
+}
+
+# everything for one table of detections, at every rule
+evaluate <- function(ko_det, pair_det, rules, pair_tpm = NULL) {
+  pmap(rules, \(rule, vent_min, nonvent_min) {
+    cl <- classify_rule(ko_det, pair_det, vent_min, nonvent_min)
+    pv <- if (is.null(pair_tpm)) cl$pair_vo else left_join(cl$pair_vo, pair_tpm, by = c("cur_L4", "ko_id"))
+    list(summary   = set_summary(cl$per_ko) |> mutate(rule = rule, .before = 1),
+         headline  = lineage_headline(pv) |> mutate(rule = rule, .before = 1),
+         vent_only = tibble(rule = rule, ko_id = cl$per_ko$ko_id[cl$per_ko$c_vo == 1]))
+  }) |>
+    list_transpose() |>
+    map(bind_rows)
+}
+```
+
+```{r run-draws}
+#| message: true
+runs <- expand_grid(scheme = SCHEMES, draw = seq_len(N_DRAWS)) |>
+  filter(scheme != "none" | draw == 1)
+
+set.seed(params$seed)
+t0 <- Sys.time()
+results <- pmap(runs, \(scheme, draw) {
+  sub      <- subsample_table(scheme)
+  ko_ue    <- detect_counts(sub, "ko_id")
+  pair_det <- detect_counts(sub, c("cur_L4", "ko_id")) |> count_detections(c("cur_L4", "ko_id"))
+  out <- evaluate(count_detections(ko_ue, "ko_id"), pair_det, rules)
+  out$depth <- ko_ue |>
+    summarise(depth = first(unit_total), ko_detected = sum(detected), .by = c(unit, vent_bin))
+  map(out, \(x) mutate(x, scheme = scheme, draw = draw, .before = 1))
+})
+message(glue("{nrow(runs)} draws in {round(difftime(Sys.time(), t0, units = 'mins'), 1)} min"))
+
+results   <- results |> list_transpose() |> map(bind_rows)
+draws     <- results$summary  |> mutate(scheme = factor(scheme, levels = SCHEMES))
+headlines <- results$headline |> mutate(scheme = factor(scheme, levels = SCHEMES))
+```
+
+## Did subsampling match depth?
+
+If non-vent units still detect more KOs at matched depth, the richness gap is not a depth
+artifact.
+
+```{r depth-diagnostic}
+depth_summary <- results$depth |>
+  summarise(median_depth = median(depth), median_ko_detected = median(ko_detected),
+            .by = c(scheme, draw, vent_bin)) |>
+  summarise(across(c(median_depth, median_ko_detected), median), .by = c(scheme, vent_bin)) |>
+  arrange(factor(scheme, levels = SCHEMES), vent_bin)
+depth_summary
+```
+
+# 3. Panel vs background across depth and threshold
+
+```{r sweep-summary}
+q <- \(x, p) unname(quantile(x, p, na.rm = TRUE))
+
+sweep_summary <- draws |>
+  mutate(diff = frac_panel - frac_bg) |>
+  summarise(across(c(n_panel, frac_panel, n_bg, frac_bg, diff, null_pctile),
+                   list(med = median, lo = \(x) q(x, 0.025), hi = \(x) q(x, 0.975))),
+            .by = c(scheme, rule, level))
+
+sweep_summary |>
+  select(level, scheme, rule, n_panel_med, frac_panel_med, frac_bg_med,
+         diff_lo, diff_hi, null_pctile_med) |>
+  arrange(level, scheme, rule)
+```
+
+> For results: a panel-specific vent signal would show as a `diff` interval that excludes 0
+> and a null percentile above 0.975 under `nonvent_to_vent`. A rise in both panel and
+> background with overlapping intervals means depth affects all KOs alike.
+
+```{r fig-sweep}
+#| fig-width: 10
+#| fig-height: 6
+plot_df <- sweep_summary |>
+  select(scheme, rule, level, starts_with("frac_")) |>
+  pivot_longer(starts_with("frac_"), names_to = c("set", ".value"),
+               names_pattern = "frac_(panel|bg)_(med|lo|hi)") |>
+  mutate(set = recode(set, panel = "Trophic-mode panel", bg = "All KOs"),
+         level = recode(level, community_vent_only = "Community: vent-only",
+                        community_vent_assoc = "Community: vent-only + vent-skewed",
+                        lineage_vent_only = "Lineage: vent-only pairs"))
+
+fig_sweep <- plot_df |>
+  ggplot(aes(rule, 100 * med, colour = set)) +
+  geom_pointrange(aes(ymin = 100 * lo, ymax = 100 * hi),
+                  position = position_dodge(width = 0.5), size = 0.25) +
+  facet_grid(level ~ scheme, scales = "free_y") +
+  scale_colour_manual(values = c("Trophic-mode panel" = "#b74a70", "All KOs" = "grey40"),
+                      name = NULL) +
+  labs(x = "Presence rule", y = "% of classified KOs / pairs") +
+  theme_bw(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "bottom")
+fig_sweep
+# ggsave("figures/08-ventonly-sensitivity.svg", fig_sweep, width = 10, height = 6)
+```
+
+# 4. Lineage headline (05b) across depth and threshold
+
+`frac_on_shared_lineages` = share of vent-only lineage-resolved KOs carried by lineages
+present in both habitats (05 lineage class "shared", held fixed). Expression share is
+reported only without subsampling (section 5), since subsampled counts are not expression.
+
+```{r lineage-headline}
+headline_summary <- headlines |>
+  summarise(across(c(n_vent_only, n_vent_only_panel, frac_on_shared_lineages, n_kept_from_05b),
+                   list(med = median, lo = \(x) q(x, 0.025), hi = \(x) q(x, 0.975))),
+            .by = c(scheme, rule)) |>
+  arrange(scheme, rule)
+headline_summary |>
+  select(scheme, rule, n_vent_only_med, n_vent_only_lo, n_vent_only_hi,
+         frac_on_shared_lineages_med, n_kept_from_05b_med)
+```
+
+## Which vent-only KOs hold up
+
+Share of `nonvent_to_vent` draws in which each KO is vent-only (community level), by rule,
+next to its 05 class.
+
+```{r ko-stability}
+ko_stability <- results$vent_only |>
+  filter(scheme == "nonvent_to_vent") |>
+  count(rule, ko_id, name = "n_draws") |>
+  mutate(share_draws = n_draws / N_DRAWS) |>
+  left_join(select(obs_ko, ko_id, class_05 = habitat_class), by = "ko_id") |>
+  mutate(panel = ko_id %in% panel_kos) |>
+  arrange(rule, desc(share_draws))
+
+ko_stability |>
+  filter(share_draws >= ROBUST) |>
+  count(rule, class_05, panel)
+```
+
+> For results: of the 31 05 vent-only KOs, how many stay vent-only at matched depth, and
+> how many KOs become vent-only only after depth matching (and whether they are panel KOs).
+
+# 5. Leave one vent field out
+
+Drops one field's vent units; non-vent units are kept. Fraction rules are recomputed on the
+remaining vent units (Von Damm 7, Gorda Ridge 4, Piccard 2 vent units). Unsubsampled, so
+expression share is defined here.
+
+```{r field-drop}
+#| message: true
+units |> count(field, vent_bin)
+
+field_drop <- map(FIELDS_IN_SCOPE, \(fld) {
+  keep <- units |> filter(!(vent_bin == "Vent" & field == fld))
+  ko_ue   <- ko_unit   |> filter(unit %in% keep$unit)
+  pair_ue <- pair_unit |> filter(unit %in% keep$unit)
+  pair_tpm <- pair_ue |> filter(vent_bin == "Vent") |>
+    summarise(tpm_vent = sum(tpm), .by = c(cur_L4, ko_id))
+  out <- evaluate(count_detections(ko_ue, "ko_id"),
+                  count_detections(pair_ue, c("cur_L4", "ko_id")),
+                  make_rules(sum(keep$vent_bin == "Vent"), sum(keep$vent_bin != "Vent")),
+                  pair_tpm = pair_tpm)
+  map(out[c("summary", "headline")], \(x)
+      mutate(x, dropped = fld, n_vent_units = sum(keep$vent_bin == "Vent"), .before = 1))
+}) |>
+  list_transpose() |>
+  map(bind_rows)
+
+field_drop$headline |> filter(rule == REF_RULE)
+field_drop$summary  |> filter(rule == REF_RULE) |>
+  select(dropped, n_vent_units, level, n_panel, frac_panel, frac_bg, null_pctile)
+```
+
+# Write
+
+```{r write}
+write_csv(depth_summary,        "output-tables/08_depth_matched_depths.csv")
+write_csv(sweep_summary,        "output-tables/08_panel_vs_background_sweep.csv")
+write_csv(headline_summary,     "output-tables/08_lineage_headline_sweep.csv")
+write_csv(ko_stability,         "output-tables/08_ko_ventonly_stability.csv")
+write_csv(field_drop$summary,   "output-tables/08_field_drop_panel.csv")
+write_csv(field_drop$headline,  "output-tables/08_field_drop_lineage.csv")
+```
+
+# QC
+
+```{r qc}
+full_depth <- rename(unit_depth, depth_full = depth)
+stopifnot(
+  # vent units are never subsampled under the primary scheme
+  results$depth |> filter(scheme == "nonvent_to_vent", vent_bin == "Vent") |>
+    left_join(full_depth, by = c("unit", "vent_bin")) |> with(all(depth == depth_full)),
+  # no subsampled unit is deeper than it started
+  results$depth |> left_join(full_depth, by = c("unit", "vent_bin")) |>
+    with(all(depth <= depth_full)),
+  # one 'none' run, N_DRAWS of each other scheme
+  all(count(distinct(draws, scheme, draw), scheme)$n == c(1, rep(N_DRAWS, length(SCHEMES) - 1))),
+  # the 'none' run at the 05 rule gives the 05b headline (flooring can move a few pairs at
+  # the per-million floor)
+  with(filter(headlines, scheme == "none", rule == REF_RULE),
+       abs(n_vent_only - nrow(ref_vo)) <= 5 & n_kept_from_05b >= nrow(ref_vo) - 5),
+  all(between(draws$frac_panel, 0, 1), between(draws$frac_bg, 0, 1)))
+```

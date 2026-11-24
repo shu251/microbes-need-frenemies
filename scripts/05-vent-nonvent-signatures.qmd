@@ -1,7 +1,5 @@
 ---
 title: "05 — Vent and non-vent signatures"
-subtitle: "Frenemies euk metaT — curated taxonomy, sample-unit level"
-author: "Hu Lab"
 date: last-modified
 format:
   html:
@@ -11,26 +9,29 @@ format:
     df-print: paged
 ---
 
-# Contents
+# Outline
 
-1. **Who leads** the vent and non-vent signatures: each class-level taxon's share of expression and its occupancy, with the shares **summed to supergroup** (the 02 curated groups).
+1. **Which taxa are most dominant** in the vent and non-vent habitat? Consider the class level expression (sum to tax level 4) and occupany pattern (distribution).
 
-2. **What dominant taxa comprise vent and non-vent**: KEGG BRITE level-B composition of each habitat, and of each leading taxon.
+2. **For dominant taxa, what is the KEGG BRITE level B composition** in each habitat and taxonomic group?
 
-3. **Habitat classes** for every KO and taxon (vent-only, vent-skewed, shared, non-vent-skewed, non-vent-only). The KO table is the hand-off to 06 and 07.
+3. **Define classifications for every KO and taxon** based on occupany/distribution (vent-only, vent-skewed, shared, non-vent-skewed, non-vent-only). The KO table is the hand-off to 06 and 07.
 
 4. **Rarefied sensitivity**: the habitat classes recomputed at equal sequencing depth.
 
-All of it is descriptive (occupancy and relative share). 
 
-**Unit expression.** Throughout this document, a unit's expression is the scaledTPM that remains after Eukaryota-only and Opisthokonta assignments are removed, averaged over the unit's replicates. Every proportion below is taken against that total.
+_Definitions_:
+**Unit expression.** Below, a unit expression is the scaledTPM that remains after Eukaryota-only assignments and Opisthokonta other than choanoflagellates are removed, averaged over replicates. Every proportion below is taken against that total.
 
-**Detection.** A feature is detected in a sample unit when its unit total is ≥ `detect_min_tpm` (1) scaledTPM **and** ≥ `detect_min_per_million` (10) per million of that unit's expression. scaledTPM carries library size (Soneson, Love & Robinson 2015, *F1000Research* 4:1521), and unit expression differs about 170-fold among units, so a TPM floor alone lets deep units detect more. The per-million floor protects deep units; the TPM floor protects shallow ones.
+**Detection/prevalence.** A feature is detected in a sample unit when its unit total is ≥ `detect_min_tpm` (1) scaledTPM **and** ≥ `detect_min_per_million` (10) per million of that unit's expression. ScaledTPM carries library size, and unit expression differs about 170-fold among units. A set TPM floor lets deep units detect more. The per-million floor preserves the samples that were sequenced deeply, the TPM floor preserves shallow ones.
 
+**Occupancy/Distribution.** Associated with a habitat = detected in at least 3 units of that habitat (`vent_min_units`, `nonvent_min_units`: >= 3 of 13 vent units, >= 3 of 6 non-vent units). A count rather than a fraction: non-vent has only 6 units, so the bar is "seen in at least three biological units" in both habitats. **Vent-only** = vent-associated and never detected in background water. Plume units are vent-influenced, so a plume detection does not break vent-only (`ventonly_tolerated_tokens`; decision 2026-11-23, was: no non-vent unit at >= 30% occupancy).
 
-**Occupancy.** Associated with a habitat = detected in ≥ 30% of its units (`occupancy_min_frac`: ≥ 4 of 13 vent units, ≥ 2 of 6 non-vent units). A fraction rather than a count, so the bar is the same height in both habitats. **Vent-only** is strict: vent-associated and detected in no non-vent unit.
+**Habitat bins.** Units are binned as vent (13) or non-vent (6: 3 plume, 3 background; `bin_vent()`), and every community test uses this binary. Plume has two roles in the classes: it counts as non-vent for association (>= 3 of the 6 plume + background units), but only a background detection removes a feature from vent-only.
 
-**Shares are relative.** A smaller share at vents means a smaller slice of protist expression, not fewer cells.
+_Methods text_: Samples were binned as vent (13 units) or non-vent (6 units: 3 plume, 3 background). Because plume water is vent-derived, a feature was called vent-only when it was vent-associated and never detected in background water; plume detections were permitted.
+
+**Counts are relative.** A smaller sum of scaltedTPM at vents means a smaller slice of protist expression, not fewer cells.
 
 # Set up
 
@@ -42,88 +43,111 @@ source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R")
 
 ```{r params}
 FIELDS_IN_SCOPE <- c("Gorda Ridge", "Von Damm", "Piccard")
-CHOSEN_DEPTH  <- 4                              # grain locked in 02
-MIN_TPM <- params$detect_min_tpm          # 1
-MIN_PER_MILLION <- params$detect_min_per_million  # 10
-OCC_MIN <- params$occupancy_min_frac      # 0.30
-N_LEADERS <- 10                              # top taxa per habitat shown
-N_RAREFY <- 20                             # rarefaction draws
-DELTA_REPORT <- 0.70                       # descriptive |Cliff's delta| line, NOT calibrated
+CHOSEN_DEPTH  <- 4 # tax level setting
+
+# Set in params in config/
+MIN_TPM <- params$detect_min_tpm; MIN_TPM # 1
+MIN_PER_MILLION <- params$detect_min_per_million; MIN_PER_MILLION #10
+MIN_UNITS <- c(vent = params$vent_min_units, nonvent = params$nonvent_min_units); MIN_UNITS # 3, 3
+VENTONLY_TOLERATED <- params$ventonly_tolerated_tokens; VENTONLY_TOLERATED # "Plume"
+
+# thresholds for taxa across habitats
+N_LEADERS <- 10 # top ten taxa per habitat shown
+N_RAREFY <- 20 # rarefaction draws
+# the 95th-percentile permutation threshold (perm95_threshold) marks it as significant.
+DELTA_ENRICH <- 0.5 # |Cliff's delta| >= this = enriched / overrepresented 
 ```
 
 ```{r prep}
-#| message: true
 # built once at the end of 02 (R/load_paired.R)
 paired <- load_paired(fields = FIELDS_IN_SCOPE, depth = CHOSEN_DEPTH)
 
 units <- paired |>
   distinct(unit = sample_unit, vent_bin, field, n_reps) |>
   arrange(vent_bin, field, unit)
-stopifnot(!anyDuplicated(units$unit))
-
-units |> count(vent_bin, field)
+# stopifnot(!anyDuplicated(units$unit))
+units |> count(vent_bin, field) #Check numebr
 ```
 
-# 1. Sequencing depth and the detection rule
+# Sequencing depth and the detection rule
 
-Retained expression per unit, and KOs detected under the TPM floor alone versus the combined rule. The combined rule should track depth much less **within** a habitat.
+Subset transcripts based on detection/prevalence rules. Setting TPM floor and the combined rule. The combined rule should track depth much less **within** a habitat.
 
 ```{r depth-check}
 #| message: true
-ko_unit <- unit_expression(paired, "ko_id", min_tpm = MIN_TPM,
+
+### Uses a written script, loaded.
+ko_unit <- unit_expression(paired, "ko_id", 
+                           min_tpm = MIN_TPM,
                            min_per_million = MIN_PER_MILLION)
 
 depth_check <- ko_unit |>
-  summarise(unit_total     = first(unit_total),
-            ko_tpm_floor   = sum(tpm >= MIN_TPM),
-            ko_detected    = sum(detected),
+  summarise(unit_total = first(unit_total), #Get first in vector
+            ko_tpm_floor = sum(tpm >= MIN_TPM),
+            ko_detected = sum(detected),
             .by = c(unit, vent_bin, field)) |>
   arrange(unit_total)
 
 depth_check |> mutate(unit_total = round(unit_total))
-?cor()
+# ?cor()
 depth_check |>
   summarise(rho_tpm_floor = cor(unit_total, ko_tpm_floor, method = "spearman"),
-            rho_combined  = cor(unit_total, ko_detected, method = "spearman"),
-            median_depth  = median(unit_total),
+            rho_combined = cor(unit_total, ko_detected, method = "spearman"),
+            median_depth = median(unit_total),
             median_ko_detected = median(ko_detected),
             .by = vent_bin)
 ```
 
-Set a detection limit: the above rule for >min_tpm and the >min_per_million will ultaimtatley work to reduce the within-habitat depth dependence. We have a very different number of vent sites per field, so that is as sampling bias to consider. non-vent samples are too small to assess
+_Trying to set a detection limit_: the above code sets a rule/threshold for > min_tpm and > min_per_million to reduce within-habitat depth dependence. We have a very different number of vent sites per field, so that is as sampling bias to consider. non-vent samples are too small to assess
 
-# 2. Who leads each habitat
+# 1. Who leads each habitat
 
-Class-level (grain 4) taxa, summed to the 02 curated groups. `mean_share` is the mean across units of the taxon's share of each unit's expression, so every unit counts once regardless of depth. Median and maximum travel with it: a mean carried by one unit is a single-vent bloom, not a habitat-wide pattern.
-
-Define *dominance*: when ta
+Class level (level 4) taxa summed and `mean_share` is the mean across taxa/metabolism, so every unit counts once regardless of depth. Median and maximum tpm are associated with each, so a mean in by one unit is a single-vent bloom, not a habitat-wide pattern.
 
 ```{r leaders}
 #| message: true
+
+# Defining major taxa
 tax_unit <- unit_expression(paired, c("cur_group", "cur_L4"),
-                            min_tpm = MIN_TPM, min_per_million = MIN_PER_MILLION)
-tax_hab  <- habitat_occupancy(tax_unit, units, c("cur_group", "cur_L4"), OCC_MIN) |>
+                            min_tpm = MIN_TPM, 
+                            min_per_million = MIN_PER_MILLION)
+
+tax_hab <- habitat_occupancy(tax_unit, 
+                              units, c("cur_group", "cur_L4"),
+                              MIN_UNITS, VENTONLY_TOLERATED) |>
   mutate(taxon = taxon_label_unique(cur_L4), .after = cur_L4)
 
-group_unit   <- unit_expression(paired, "cur_group")
+
+group_unit <- unit_expression(paired, "cur_group")
+
 group_totals <- complete_units(group_unit, units, "cur_group") |>
-  summarise(mean_share = mean(share), median_share = median(share),
-            min_share = min(share), max_share = max(share),
+  summarise(mean_share = mean(share), 
+            median_share = median(share),
+            min_share = min(share), 
+            max_share = max(share),
             .by = c(cur_group, vent_bin)) |>
-  arrange(vent_bin, desc(mean_share))
+  arrange(vent_bin, 
+          desc(mean_share))
 
 # taxa needed to reach 50% / 80% of mean expression in each habitat
 dominance <- bind_rows(
-  tax_hab |> transmute(vent_bin = "Vent", s = mean_share_vent),
-  tax_hab |> transmute(vent_bin = "Non-vent", s = mean_share_nonvent)) |>
+  tax_hab |> 
+    transmute(vent_bin = "Vent", s = mean_share_vent),
+  tax_hab |> 
+    transmute(vent_bin = "Non-vent", s = mean_share_nonvent)) |>
   arrange(vent_bin, desc(s)) |>
   mutate(cumul = cumsum(s), .by = vent_bin) |>
-  summarise(n_taxa_50 = sum(cumul < 0.5) + 1L, n_taxa_80 = sum(cumul < 0.8) + 1L,
+  summarise(n_taxa_50 = sum(cumul < 0.5) + 1L,
+            n_taxa_80 = sum(cumul < 0.8) + 1L,
             n_taxa_detected = sum(s > 0), .by = vent_bin)
 dominance
 
 # Get the top NUMBER OF LEADER taxa for vents and non-vents. Defined above (n=10).
 leaders <- union(slice_max(tax_hab, mean_share_vent, n = N_LEADERS)$cur_L4,
+                 slice_max(tax_hab, mean_share_nonvent, n = N_LEADERS)$cur_L4)
+
+## Which overlap?
+intersect(slice_max(tax_hab, mean_share_vent, n = N_LEADERS)$cur_L4,
                  slice_max(tax_hab, mean_share_nonvent, n = N_LEADERS)$cur_L4)
 
 tax_hab |>
@@ -146,16 +170,13 @@ tax_hab |>
 
 > For results: which curated groups and class-level taxa lead each habitat, and which leaders differ between habitats in share versus in occupancy.
 
-> Per-unit composition bars at the curated-group level are in `03_metat-data-overview.qmd`.
-
 ## Figure: leading taxa, every unit shown
 
-Points are units; the bar is the habitat median. Taxa are ordered within their curated group and colored by it.
+Points are samples, the bar is the habitat median. Taxa are ordered within their curated group.
 
 ```{r fig-leaders}
 #| fig-width: 8
 #| fig-height: 6
-#| fig-cap: "Proportion of unit expression (scaledTPM) for the leading class-level taxa (grain 4; the top `N_LEADERS` (10) taxa by mean proportion in each habitat, combined). Each point is one sample unit (triangles, vent; circles, non-vent) and horizontal bars mark the habitat median. Units where a taxon is absent are plotted at zero. Taxa are ordered within, and colored by, curated group."
 leader_pts <- complete_units(tax_unit |> filter(cur_L4 %in% leaders), units,
                              c("cur_group", "cur_L4")) |>
   mutate(taxon = taxon_label_unique(cur_L4),
@@ -163,8 +184,10 @@ leader_pts <- complete_units(tax_unit |> filter(cur_L4 %in% leaders), units,
   arrange(cur_group, taxon) |>
   mutate(taxon = fct_rev(fct_inorder(taxon)))
 
-fig_leaders <- ggplot(leader_pts, aes(x = taxon, y = share)) +
-  stat_summary(aes(group = vent_bin), fun = median, fun.min = median, fun.max = median,
+fig_leaders <- leader_pts |> 
+  ggplot(aes(x = taxon, y = share)) +
+  stat_summary(aes(group = vent_bin), 
+               fun = median, fun.min = median, fun.max = median,
                geom = "crossbar", width = 0.6, linewidth = 0.3, colour = "grey30",
                position = position_dodge(width = 0.7)) +
   geom_point(aes(fill = cur_group, shape = vent_bin, group = vent_bin),
@@ -176,18 +199,21 @@ fig_leaders <- ggplot(leader_pts, aes(x = taxon, y = share)) +
   scale_y_continuous(labels = scales::percent) +
   guides(fill = guide_legend(override.aes = list(shape = 21))) +
   coord_flip() +
-  labs(y = "Proportion of unit expression (scaledTPM)", x = NULL) +
+  labs(y = "Proportion of unit expression (scaledTPM)", x = "") +
   theme_classic(base_size = 10)
 fig_leaders
 # ggsave("figures/05-leaders.svg", fig_leaders, width = 8, height = 6)
 ```
+
+
+> Top ten taxa by mean proportion in each habitat. Each point is one sample unit and  bars mark the habitat median. Units where a taxon is absent are plotted at zero. Taxa are ordered within, and colored by, curated group
 
 ## Composition contrast: vent versus non-vent
 
 Shares sum to 1 within a unit, so a larger share for one taxon forces smaller shares elsewhere. The contrast is therefore tested on robust-CLR values (zeros kept at 0, the 02/04 choice), and shares are used only for display. Three outputs:
 
 * **Whole composition:** PERMANOVA on rclr Euclidean (Aitchison) distance, vent versus non-vent, with a PERMDISP check; 13 vs. 6 units is unbalanced, so a dispersion difference can masquerade as a location difference.
-* **Per taxon:** Cliff's delta (vent focal) on rclr, with a label-permutation max-T threshold across all features in the family, the same primary filter as 05.
+* **Per taxon:** Cliff's delta (vent focal) on rclr, with a 95th-percentile permutation threshold across all features in the family, the same primary filter as 05.
 * **Display:** each unit's share, zero where absent, with the habitat median.
 
 Units, not libraries, are the replicates throughout.
@@ -212,9 +238,13 @@ compare_composition <- function(z, n_perm = N_PERM_COMP) {
   null_max <- map_dbl(seq_len(n_perm), \(i)
     max(abs(contrast_ranks(z, set_names(sample(hab), names(hab)), "Vent")), na.rm = TRUE))
   tibble(feature = names(observed), cliffs_delta = observed,
-         maxt_threshold = unname(quantile(null_max, 0.95))) |>
-    # mutate(exceeds_maxt = abs(cliffs_delta) >= maxt_threshold)
-    mutate(exceeds_maxt = abs(cliffs_delta) >= 0.5)
+         # >SKH: 2026-11-12 50th and 75th percentiles added for the 1-2-3 asterisk tiers (Figure 3)
+         perm50_threshold = unname(quantile(null_max, 0.50)),
+         perm75_threshold = unname(quantile(null_max, 0.75)),
+         perm95_threshold = unname(quantile(null_max, 0.95))) |>
+    # enriched: effect-size line; significant: beyond the 95th percentile of the permuted largest |delta|
+    mutate(enriched    = abs(cliffs_delta) >= DELTA_ENRICH,
+           significant = abs(cliffs_delta) >= perm95_threshold)
 }
 
 set.seed(params$seed)
@@ -255,17 +285,18 @@ composition_taxon |> filter(cur_L4 %in% leaders) |>
 #| fig-width: 7
 #| fig-height: 4
 #| warning: false
-#| fig-cap: "Distribution of Cliff's delta on robust-CLR values across every class-level taxon (vent focal, so positive values rank higher at vents). Solid lines mark the label-permutation max-T threshold, which is calibrated family-wise against the shuffled-label null. Dashed lines mark the descriptive reporting line at |delta| = `DELTA_REPORT`: a chosen cutoff, not a test. Ticks along the lower axis mark the leading taxa. Based on 13 vent and 6 non-vent units."
-maxt_line <- unique(composition_taxon$maxt_threshold)
-stopifnot(length(maxt_line) == 1, DELTA_REPORT > 0, DELTA_REPORT < maxt_line)
 
-delta_bands <- c("Below reporting line", "Above reporting line", "Exceeds max-T")
+perm95_line <- unique(composition_taxon$perm95_threshold)
+
+stopifnot(length(perm95_line) == 1, DELTA_ENRICH > 0, DELTA_ENRICH < perm95_line)
+
+delta_bands <- c("Below enrichment line", "Enriched", "Significant")
 
 delta_dist <- composition_taxon |>
   mutate(is_leader = cur_L4 %in% leaders,
-         band = case_when(abs(cliffs_delta) >= maxt_line    ~ "Exceeds max-T",
-                          abs(cliffs_delta) >= DELTA_REPORT ~ "Above reporting line",
-                          TRUE                              ~ "Below reporting line"),
+         band = case_when(abs(cliffs_delta) >= perm95_line   ~ "Significant",
+                          abs(cliffs_delta) >= DELTA_ENRICH  ~ "Enriched",
+                          TRUE                               ~ "Below enrichment line"),
          band = factor(band, levels = delta_bands))
 
 # what each line would put in the results, and which habitat it leans to
@@ -279,8 +310,8 @@ delta_dist |>
 
 # one row per drawn line: both tails of both thresholds
 delta_guides <- tibble(
-    kind = rep(c("Family-wise max-T", "Reporting line (descriptive)"), each = 2),
-    x    = c(maxt_line, -maxt_line, DELTA_REPORT, -DELTA_REPORT)) |>
+    kind = rep(c("95th-percentile permutation threshold", "Enrichment line"), each = 2),
+    x    = c(perm95_line, -perm95_line, DELTA_ENRICH, -DELTA_ENRICH)) |>
   mutate(kind = fct_inorder(kind))
 
 fig_delta_dist <- ggplot(delta_dist, aes(x = cliffs_delta)) +
@@ -290,12 +321,12 @@ fig_delta_dist <- ggplot(delta_dist, aes(x = cliffs_delta)) +
            colour = "grey25", linewidth = 0.4) +
   geom_vline(data = delta_guides, aes(xintercept = x, linetype = kind),
              colour = "grey15", linewidth = 0.4) +
-  scale_fill_manual(values = c("Below reporting line" = "grey82",
-                               "Above reporting line" = "#E69F00",
-                               "Exceeds max-T"        = "#0072B2"),
+  scale_fill_manual(values = c("Below enrichment line" = "grey82",
+                               "Enriched"              = "#E69F00",
+                               "Significant"           = "#0072B2"),
                     breaks = rev(delta_bands), name = NULL) +
-  scale_linetype_manual(values = c("Family-wise max-T"            = "solid",
-                                   "Reporting line (descriptive)" = "22"),
+  scale_linetype_manual(values = c("95th-percentile permutation threshold" = "solid",
+                                   "Enrichment line"                       = "22"),
                         name = NULL) +
   scale_x_continuous(breaks = seq(-1, 1, 0.5)) +
   coord_cartesian(xlim = c(-1.05, 1.05)) +
@@ -303,18 +334,82 @@ fig_delta_dist <- ggplot(delta_dist, aes(x = cliffs_delta)) +
        y = "Class-level taxa") +
   theme_classic(base_size = 10) +
   theme(legend.position = "top", legend.direction = "vertical")
+
 fig_delta_dist
 # ggsave("figures/05-delta-distribution.svg", fig_delta_dist, width = 7, height = 4)
 ```
+> Distribution of Cliff's delta on robust CLR values across every class-level taxon, positive means higher rank in vents. Solid lines mark the 95th-percentile permutation threshold: the 95th percentile of the largest |delta| across all taxa when habitat labels are shuffled across units (a family-wise null). Dashed lines mark the enrichment line at |delta| = `DELTA_ENRICH`, a chosen effect-size cutoff, not a test. Ticks along the lower axis mark the leading taxa. Based on 13 vent and 6 non-vent units
 
-> For results: how many taxa the descriptive line admits versus max-T, and which habitat they lean to. Only max-T is calibrated against the shuffled-label null; `DELTA_REPORT` is a reporting convention and must be named as one.
+> For results: how many taxa are enriched (|delta| >= `DELTA_ENRICH`) versus significant (beyond the 95th-percentile permutation threshold), and which habitat they lean to. Only the permutation threshold is calibrated against the shuffled-label null; `DELTA_ENRICH` is an effect-size convention and must be named as one.
+
+## Figure: every taxon on robust-CLR
+
+Geometric mean (rCLR) for all taxa
+
+
+```{r fig-taxa-heatmap}
+#| fig-width: 5
+#| fig-height: 18
+#| warning: false
+#| 
+# taxa kept: pass the occupancy filter in at least one habitat
+heat_taxa <- tax_hab |>
+  filter(habitat_class != "below_filter") |>
+  select(cur_group, cur_L4, taxon) |>
+  left_join(composition_taxon |> select(cur_L4, cliffs_delta, perm95_threshold),
+            by = "cur_L4") |>
+  mutate(significant = abs(cliffs_delta) >= perm95_threshold,
+         row_lab     = if_else(significant, paste0(taxon, " *"), taxon),
+         cur_group  = factor(cur_group,
+                             levels = intersect(SUPERGROUP_0_ordering, unique(cur_group)))) |>
+  arrange(cur_group, desc(cliffs_delta)) |>
+  mutate(row_lab = fct_rev(fct_inorder(row_lab)))
+
+# units x taxa rCLR to long; rclr_transform() leaves absent taxa at exactly 0
+heat_long <- z_taxon |>
+  as_tibble(rownames = "unit") |>
+  pivot_longer(-unit, names_to = "cur_L4", values_to = "rclr") |>
+  inner_join(heat_taxa, by = "cur_L4") |>
+  left_join(units |> select(unit, vent_bin), by = "unit") |>
+  mutate(rclr     = na_if(rclr, 0),
+         vent_bin = fct_relevel(factor(vent_bin), "Vent"),
+         unit_lab = factor(unit, levels = order_sample_names, labels = label_sample_names))
+
+# stopifnot(!anyNA(heat_long$unit_lab), !anyNA(heat_long$vent_bin))
+
+rclr_cap <- quantile(abs(heat_long$rclr), 0.99, na.rm = TRUE)
+
+fig_taxa_heatmap <- ggplot(heat_long, aes(x = unit_lab, y = row_lab, fill = rclr)) +
+  geom_tile(colour = "white", linewidth = 0.2) +
+  scale_fill_distiller(palette = "RdBu", direction = -1,
+                       limits = c(-rclr_cap, rclr_cap), oob = scales::squish,
+                       na.value = "grey88", name = "rCLR") +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0), position = "right") +
+  facet_grid(cur_group ~ vent_bin, scales = "free", space = "free", switch = "y") +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 8) +
+  theme(panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1, color = "black"),
+        axis.text.y = element_text(hjust = 0, vjust = 0.5, color = "black"),
+        strip.text.y.left = element_text(angle = 0, hjust = 1, color = "black"),
+        strip.placement = "outside",
+        panel.spacing = grid::unit(2, "pt"),
+        legend.position = "top")
+
+fig_taxa_heatmap
+
+# ggsave("figures/05-taxa-heatmap.svg", fig_taxa_heatmap, width = 5, height = 18)
+```
+
+> For results: whether the significant taxa are carried by consistent shifts across units or by presence/absence in a few units, and which curated groups hold them.
 
 
 ```{r fig-group-contrast}
 #| fig-width: 8
 #| fig-height: 5
 #| warning: false
-#| fig-cap: "Proportion of unit expression (scaledTPM) for each curated group in vent and non-vent units. Points are sample units (triangles, vent, n = 13; circles, non-vent, n = 6), with zero where a group is absent; horizontal bars mark the habitat median. Asterisks mark groups whose Cliff's delta on robust-CLR values exceeds the label-permutation max-T threshold (95th percentile of the maximum absolute delta over all groups)."
+
 habitat_pal <- c(Vent = "#b74a70", `Non-vent` = "#346D6E")
 
 # groups in display order, restricted to those present in these units
@@ -324,7 +419,7 @@ group_pts <- complete_units(group_unit, units, "cur_group") |>
   mutate(cur_group = factor(cur_group, levels = rev(group_present)))
 
 group_flags <- composition_group |>
-  filter(exceeds_maxt) |>
+  filter(significant) |>
   mutate(cur_group = factor(cur_group, levels = levels(group_pts$cur_group))) |>
   left_join(summarise(group_pts, y_top = max(share), .by = cur_group), by = "cur_group")
 
@@ -347,9 +442,9 @@ fig_group_contrast
 # ggsave("figures/05-group-contrast.svg", fig_group_contrast, width = 8, height = 5)
 ```
 
-> For results: PERMANOVA R2 and p with the dispersion p, then the curated groups (and leading class-level taxa) whose delta clears max-T. Report the threshold value.
+> For results: PERMANOVA R2 and p with the dispersion p, then the curated groups (and leading class-level taxa) whose delta clears the 95th-percentile permutation threshold. Report the threshold value.
 
-# 3. What the leaders express (KEGG level B)
+# 2. Taxonomic group functional signatures (KEGG level B)
 
 Each KO is placed in its KEGG level-B categories (`read_brite_level_b()`, the same map as 04 and 06); a KO in *n* categories splits its TPM equally across them. Shares are of **mapped** expression only; the coverage table says how much that is per unit.
 
@@ -363,19 +458,22 @@ kegg_long <- paired |>
              by = "ko_id", relationship = "many-to-many") |>
   mutate(scaledTPM = scaledTPM / n_cat)
 
-kegg_coverage <- unit_expression(paired |> mutate(mapped = ko_id %in% brite_map$ko_id),
-                                 "mapped") |>
+kegg_coverage <- unit_expression(paired |> 
+                                   mutate(mapped = ko_id %in% brite_map$ko_id), "mapped") |>
   filter(mapped) |>
   select(unit, vent_bin, mapped_share = share)
+
 kegg_coverage |> summarise(min = min(mapped_share), median = median(mapped_share),
                            max = max(mapped_share), .by = vent_bin)
 
 kegg_unit <- unit_expression(kegg_long, c("a_description", "description"))
+
 kegg_by_habitat <- complete_units(kegg_unit, units, c("a_description", "description")) |>
   summarise(mean_share = mean(share), median_share = median(share),
             .by = c(a_description, description, vent_bin)) |>
   pivot_wider(names_from = vent_bin, values_from = c(mean_share, median_share)) |>
   arrange(desc(`mean_share_Vent` + `mean_share_Non-vent`))
+
 kegg_by_habitat |> mutate(across(where(is.double), \(x) round(100 * x, 2)))
 ```
 
@@ -405,7 +503,7 @@ leader_kegg |> filter(mean_taxon_share >= 0.05) |>
 ```
 
 ```{r fig-leader-kegg}
-#| fig-width: 9
+#| fig-width: 8
 #| fig-height: 9
 #| fig-cap: "KEGG BRITE level-B profile of each leading taxon in each habitat. Rows are class-level taxa in vent or non-vent units (n, units in which the taxon is detected). Columns are the 20 level-B categories with the largest combined mean share of mapped expression. Fill and printed values give the percent of the taxon's mapped expression in the category, averaged over the units where the taxon is detected (values below 2% are not printed). A KO in more than one category splits its expression equally among them. Rows are ordered by curated group."
 top_cats <- kegg_by_habitat |> 
@@ -437,7 +535,7 @@ fig_leader_kegg <- leader_kegg |>
         axis.text.x = element_text(angle = 90, hjust = 1, 
                                    size = 7, color = "grey5"))
 fig_leader_kegg
-# ggsave("figures/05-leader-kegg.svg", fig_leader_kegg, width = 11, height = 8)
+ggsave("figures/05-leader-kegg.svg", fig_leader_kegg, width = 8, height = 9)
 ```
 KEGG BRITE level-B profile of each leading taxon in each habitat. Rows are class-level taxa in vent or non-vent units (n, units in which the taxon is detected). Columns are the 20 level-B categories with the largest combined mean share of mapped expression. Fill and printed values give the percent of the taxon's mapped expression in the category, averaged over the units where the taxon is detected (values below 2% are not printed). A KO in more than one category splits its expression equally among them. Rows are ordered by curated group.
 
@@ -494,6 +592,160 @@ fig_leader_dumbbell
 ```
 Vent and non-vent KEGG level-B profiles of the same leading taxon. Each panel is one class-level taxon detected in at least two units in each habitat (unit counts in the panel title). Points give the mean share of the taxon's mapped expression in each category for non-vent (teal) and vent (rose) units, and the line joins the two habitats. Categories are the 20 shown in the heatmap above.
 > For results: categories with long lines in most panels shift within lineages (translation is the candidate). Categories with long lines in only one or two panels are lineage-specific.
+
+## Figures: KEGG level B on robust-CLR
+
+Same idea as the taxa heatmap, for function. rCLR is computed once over **all** level-B categories (21 after the excluded A blocks and the level-B curation), and the top-20 figures show a subset of those same values, so the color of a cell is identical in both versions. Grey is absent, not 0.
+
+* **Community:** each unit's mapped expression across level-B categories, with Cliff's delta (vent focal) and the 95th-percentile permutation threshold over all categories.
+* **Within taxon:** for every occupancy-filtered taxon, the rCLR of its own level-B mix in each unit where it is detected, averaged over those units per habitat. The reference is the geometric mean of the categories that taxon expresses in that unit, so taxa with little mapped expression (few categories) are noisier.
+
+```{r kegg-rclr}
+#| message: true
+# level-B order: grouped by level A
+cat_order <- kegg_by_habitat |>
+  distinct(a_description, description) |>
+  arrange(a_description, description)
+stopifnot(!anyDuplicated(cat_order$description))
+
+# community: units x categories rCLR, contrast over all categories
+set.seed(params$seed)
+z_kegg <- composition_rclr(kegg_unit, "description")
+composition_kegg <- compare_composition(z_kegg) |>
+  rename(description = feature) |>
+  mutate(significant = abs(cliffs_delta) >= perm95_threshold,
+         # >SKH: 2026-11-12 asterisk tiers on the permuted largest |delta|:
+         # * >= 50th, ** >= 75th, *** >= 95th percentile (*** = significant)
+         delta_stars = case_when(abs(cliffs_delta) >= perm95_threshold ~ "***",
+                                 abs(cliffs_delta) >= perm75_threshold ~ "**",
+                                 abs(cliffs_delta) >= perm50_threshold ~ "*",
+                                 TRUE ~ ""))
+
+kegg_heat_long <- z_kegg |>
+  as_tibble(rownames = "unit") |>
+  pivot_longer(-unit, names_to = "description", values_to = "rclr") |>
+  left_join(cat_order, by = "description") |>
+  left_join(composition_kegg, by = "description") |>
+  left_join(units |> select(unit, vent_bin), by = "unit") |>
+  mutate(rclr  = na_if(rclr, 0),
+         vent_bin = fct_relevel(factor(vent_bin), "Vent"),
+         unit_lab = factor(unit, levels = order_sample_names, labels = label_sample_names),
+         row_lab= if_else(delta_stars != "", paste(description, delta_stars), description)) |>
+  arrange(a_description, desc(cliffs_delta)) |>
+  mutate(row_lab = fct_rev(fct_inorder(row_lab)))
+
+composition_kegg |>
+  left_join(cat_order, by = "description") |>
+  arrange(desc(abs(cliffs_delta))) |>
+  mutate(across(where(is.double), \(x) round(x, 3)))
+
+# within taxon: rCLR of each taxon's level-B mix, per unit where the taxon is detected
+taxon_kegg_rclr <- unit_expression(kegg_long |> filter(cur_L4 %in% heat_taxa$cur_L4),
+                                   c("cur_L4", "description")) |>
+  semi_join(detected_taxa, by = c("unit", "cur_L4")) |>
+  filter(tpm > 0) |>
+  mutate(rclr = log(tpm) - mean(log(tpm)), .by = c(unit, cur_L4)) |>
+  summarise(mean_rclr = mean(rclr), n_units = n_distinct(unit),
+            .by = c(vent_bin, cur_L4, description)) |>
+  mutate(vent_bin = as.character(vent_bin))
+
+# every taxon x category x habitat, so never-expressed cells draw as grey
+taxon_kegg_long <- heat_taxa |>
+  select(cur_group, cur_L4, row_lab) |>
+  cross_join(cat_order) |>
+  cross_join(tibble(vent_bin = c("Vent", "Non-vent"))) |>
+  left_join(taxon_kegg_rclr, by = c("vent_bin", "cur_L4", "description")) |>
+  mutate(vent_bin    = factor(vent_bin, levels = c("Vent", "Non-vent")),
+         description = factor(description, levels = cat_order$description))
+
+# shared color caps so the all-category and top-20 versions match
+kegg_cap  <- quantile(abs(kegg_heat_long$rclr), 0.99, na.rm = TRUE)
+taxon_cap <- quantile(abs(taxon_kegg_long$mean_rclr), 0.99, na.rm = TRUE)
+
+rclr_fill <- function(cap) {
+  scale_fill_distiller(palette = "RdBu", direction = -1,
+                       limits = c(-cap, cap), oob = scales::squish,
+                       na.value = "grey88", name = "rCLR")
+}
+
+heat_theme <- theme_minimal(base_size = 9) +
+  theme(panel.grid = element_blank(),
+        axis.text = element_text(color = "black"),
+        strip.text.y.left = element_text(angle = 0, hjust = 1, color = "black"),
+        strip.placement = "outside",
+        panel.spacing= grid::unit(2, "pt"),
+        legend.position = "top")
+
+plot_kegg_units <- function(df) {
+  ggplot(df, aes(x = unit_lab, y = row_lab, fill = rclr)) +
+    geom_tile(color = "grey5", linewidth = 0.3) +
+    rclr_fill(kegg_cap) +
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0), position = "right") +
+    facet_grid(a_description ~ vent_bin, scales = "free", space = "free", switch = "y",
+               labeller = labeller(a_description = label_wrap_gen(18))) +
+    labs(x = NULL, y = NULL) +
+    heat_theme +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1, color = "black"),
+          axis.text.y = element_text(color = "black", vjust = 0.5, hjust = 0))
+}
+
+plot_taxon_kegg <- function(df) {
+  ggplot(df, aes(x = description, y = row_lab, fill = mean_rclr)) +
+    geom_tile(colour = "grey15", linewidth = 0.3) +
+    rclr_fill(taxon_cap) +
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0), position = "right") +
+    facet_grid(cur_group ~ vent_bin, scales = "free", space = "free", switch = "y") +
+    labs(x = NULL, y = NULL) +
+    heat_theme +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, color = "black"),
+          axis.text.y = element_text(color = "black", vjust = 0.5, hjust = 0))
+}
+```
+
+```{r fig-kegg-units-all}
+#| fig-width: 7
+#| fig-height: 6
+#| warning: false
+#| fig-cap: "Robust-CLR expression of every KEGG level-B category, one column per sample unit (13 vent, 6 non-vent). Color is log mapped expression relative to the geometric mean of the categories present in that unit (0, white); grey is absent. Rows are grouped by level A and ordered within it by Cliff's delta (vent focal), higher at vents on top. Asterisks give |delta| against the permuted largest |delta| over all level-B categories (2,000 permutations of habitat labels): * at or above the 50th percentile, ** the 75th, *** the 95th (significant). A KO in n categories splits its expression equally among them."
+fig_kegg_units_all <- plot_kegg_units(kegg_heat_long)
+fig_kegg_units_all
+# ggsave("figures/05-kegg-units-all.svg", fig_kegg_units_all, width = 7, height = 6)
+```
+
+```{r fig-kegg-units-top}
+#| fig-width: 7
+#| fig-height: 5
+#| warning: false
+#| fig-cap: "As above, restricted to the 20 level-B categories with the largest combined mean share (the categories in the leader profile heatmap). Values, color scale and 95th-percentile permutation threshold are those of the all-category figure."
+fig_kegg_units_top <- plot_kegg_units(kegg_heat_long |> filter(description %in% top_cats))
+fig_kegg_units_top
+# ggsave("figures/05-kegg-units-top.svg", fig_kegg_units_top, width = 7, height = 5)
+```
+
+```{r fig-taxon-kegg-all}
+#| fig-width: 12
+#| fig-height: 18
+#| warning: false
+#| fig-cap: "Level-B profile of every class-level taxon passing the occupancy filter, in vent and non-vent units. Color is the taxon's rCLR for the category (log share of its own mapped expression relative to the geometric mean of the categories it expresses in that unit), averaged over the units of that habitat where the taxon is detected and expresses the category. Grey: never expressed in that habitat, or the taxon is not detected there. Columns are level-B categories ordered by level A; rows and asterisks follow the taxa heatmap."
+fig_taxon_kegg_all <- plot_taxon_kegg(taxon_kegg_long)
+fig_taxon_kegg_all
+# ggsave("figures/05-taxon-kegg-all.svg", fig_taxon_kegg_all, width = 12, height = 18)
+```
+
+```{r fig-taxon-kegg-top}
+#| fig-width: 10
+#| fig-height: 18
+#| warning: false
+#| fig-cap: "As above, restricted to the 20 level-B categories in the leader profile heatmap. Values and color scale are those of the all-category figure."
+fig_taxon_kegg_top <- plot_taxon_kegg(taxon_kegg_long |> filter(description %in% top_cats))
+fig_taxon_kegg_top
+# ggsave("figures/05-taxon-kegg-top.svg", fig_taxon_kegg_top, width = 10, height = 18)
+```
+
+> For results: which level-B categories clear the 95th-percentile permutation threshold at the community level, and whether the taxa carrying them show the same shift in their own profiles (within-lineage) or not (composition).
+
 
 ## Alternative view: same lineage or different lineages?
 
@@ -561,9 +813,9 @@ shift_decomp |>
 LABEL_MIN_PP <- 1.0
 
 shift_xy <- shift_decomp |>
-  mutate(within_pp   = 100 * within_lineage,
-         comp_pp     = 100 * composition,
-         delta_pp    = 100 * delta,
+  mutate(within_pp = 100 * within_lineage,
+         comp_pp = 100 * composition,
+         delta_pp = 100 * delta,
          larger_part = if_else(abs(within_lineage) >= abs(composition),
                                "Same lineage, different expression",
                                "Different lineages lead"))
@@ -599,11 +851,11 @@ fig_kegg_shift
 
 > For results: the falling diagonal splits vent-higher (above) from non-vent-higher (below); fill says whether the difference came from the same lineages expressing differently or from different lineages leading, and point area gives its size. The split depends on the lineage grain (`lineage_col`) and is descriptive, with 6 non-vent units.
 
-# 4. Habitat classes for KOs and taxa
+# 3. Habitat classes for KOs and taxa
 
 ```{r habitat-classes}
 #| message: true
-ko_hab <- habitat_occupancy(ko_unit, units, "ko_id", OCC_MIN)
+ko_hab <- habitat_occupancy(ko_unit, units, "ko_id", MIN_UNITS, VENTONLY_TOLERATED)
 
 bind_rows(ko_hab |> count(habitat_class) |> mutate(feature = "KO"),
           tax_hab |> count(habitat_class) |> mutate(feature = "class-level taxon")) |>
@@ -645,7 +897,7 @@ class_coverage
 ```{r fig-class-kegg}
 #| fig-width: 8
 #| fig-height: 8
-#| fig-cap: "KEGG level-B composition of each KO habitat class. Columns are habitat classes (n, KOs in the class; mapped, KOs with a level-B assignment). Fill and printed values give the percent of the class's mapped KOs in each category (values below 1% are not printed); a KO in several categories counts 1/n in each. A habitat is associated with a KO when the KO is detected in at least 30% of its units. Vent-only KOs are vent-associated and detected in no non-vent unit. Rows are grouped by KEGG level-A class."
+#| fig-cap: "KEGG level-B composition of each KO habitat class. Columns are habitat classes (n, KOs in the class; mapped, KOs with a level-B assignment). Fill and printed values give the percent of the class's mapped KOs in each category (values below 1% are not printed); a KO in several categories counts 1/n in each. A habitat is associated with a KO when the KO is detected in at least 3 of its units. Vent-only KOs are vent-associated and never detected in background water (plume detections allowed). Rows are grouped by KEGG level-A class."
 class_lab <- class_coverage |>
   mutate(lab = glue("{str_replace(habitat_class, '_', '-')}\nn = {n_ko}\n({n_mapped} mapped)")) |>
   select(habitat_class, lab) |> deframe()
@@ -670,9 +922,9 @@ fig_class_kegg <- class_kegg |>
         axis.text.x.top = element_text(angle = 90, hjust = 0, vjust = 0.5,
                                        size = 7, color = "grey5"))
 fig_class_kegg
-# ggsave("figures/05-class-kegg.svg", fig_class_kegg, width = 8, height = 8)
+ggsave("figures/05-class-kegg.svg", fig_class_kegg, width = 8, height = 8)
 ```
-KEGG level-B composition of each KO habitat class. Columns are habitat classes (n, KOs in the class; mapped, KOs with a level-B assignment). Fill and printed values give the percent of the class's mapped KOs in each category (values below 1% are not printed); a KO in several categories counts 1/n in each. A habitat is associated with a KO when the KO is detected in at least 30% of its units. Vent-only KOs are vent-associated and detected in no non-vent unit. Rows are grouped by KEGG level-A class.
+KEGG level-B composition of each KO habitat class. Columns are habitat classes (n, KOs in the class; mapped, KOs with a level-B assignment). Fill and printed values give the percent of the class's mapped KOs in each category (values below 1% are not printed); a KO in several categories counts 1/n in each. A habitat is associated with a KO when the KO is detected in at least 3 of its units. Vent-only KOs are vent-associated and never detected in background water (plume detections allowed). Rows are grouped by KEGG level-A class.
 
 ## Alternative view: enrichment in vent-associated KOs
 
@@ -685,7 +937,7 @@ if KOs fell into groups at random (all mapped, detected KOs as the background).
 * Dot size is the number of KOs in that category and group (no dot = none).
 * `*` marks BH q <= 0.05 (Fisher's exact test, one test per category and group, BH across all of them).
 * A KO placed in several categories counts once in each, so these are KO counts, not the fractional weights in the heatmap.
-* The vent-associated group is small (31 vent-only + 24 vent-skewed KOs, about 40 of them mapped to KEGG), so the tests have little power and are exploratory.
+* The vent-associated group is small (31 vent-only + 21 vent-skewed KOs, 34 of them mapped to KEGG level B), so the tests have little power and are exploratory.
 * The non-vent-associated group largely reflects the deeper sequencing of non-vent units (see section 5), so read it as a contrast, not as habitat biology.
 
 ```{r class-kegg-enrichment}
@@ -744,7 +996,8 @@ fig_class_enrich <- class_enrich |>
   mutate(description = fct_reorder(description, ord),
          a_description = str_wrap(a_description, 14)) |>
   ggplot(aes(class_group, description)) +
-  geom_point(aes(size = k, fill = log2_enrich), shape = 21, colour = "grey30") +
+  geom_tile(aes(fill = log2_enrich)) +
+  # geom_point(aes(size = k, fill = log2_enrich), shape = 21, colour = "grey30") +
   geom_text(data = \(d) filter(d, sig), label = "*", nudge_x = 0.25, size = 5) +
   scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0,
                        limits = c(-2, 2), oob = scales::squish,
@@ -761,9 +1014,279 @@ fig_class_enrich
 # ggsave("figures/05-class-kegg-enrichment.svg", fig_class_enrich, width = 7, height = 8)
 ```
 
+### Figure 3
+
+```{r fig-kegg-two-panel}
+#| fig-width: 10
+#| fig-height: 7
+#| warning: false
+# one row order for both panels, read from the heatmap's own factor levels (top row first)
+kegg_row_order <- kegg_heat_long |>
+  distinct(row_lab, description) |>
+  mutate(row_lab = factor(row_lab, levels = levels(kegg_heat_long$row_lab))) |>
+  arrange(desc(row_lab)) |>
+  pull(description)
+stopifnot(!anyDuplicated(kegg_row_order))
+
+enrich_tiles <- class_enrich |>
+  filter(description %in% kegg_row_order) |>
+  select(class_group, description, log2_enrich, sig) |>
+  complete(class_group, description = kegg_row_order) |>
+  left_join(cat_order, by = "description") |>
+  mutate(sig         = coalesce(sig, FALSE),
+         description = factor(description, levels = rev(kegg_row_order)))
+
+fig_class_enrich_aligned <- ggplot(enrich_tiles, aes(class_group, description)) +
+  geom_tile(aes(fill = log2_enrich), color = "grey10", linewidth = 0.3) +
+  # >SKH: 2026-11-12 a black dot marks BH q <= 0.05 (not *, which marks the left panel's delta
+  # tiers, and not the dagger, which marks shared-mode features in 06/07)
+  geom_point(data = \(d) filter(d, sig), shape = 16, size = 1.5, colour = "black") +
+  # scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0,
+  #                      limits = c(-2, 2), oob = scales::squish, na.value = "grey88",
+  #                      name = "log2 enrichment") +
+  scale_fill_gradient2(low = "#542788", mid = "white", high = "#E08214", midpoint = 0,
+                     limits = c(-2, 2), oob = scales::squish, na.value = "grey88",
+                     name = "log2 enrichment") +
+  scale_x_discrete(labels = enrich_col_lab, position = "top", expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0), position = "right") +
+  facet_grid(a_description ~ ., scales = "free_y", space = "free_y", switch = "y",
+             labeller = labeller(a_description = label_wrap_gen(18))) +
+  labs(x = NULL, y = NULL) +
+  heat_theme +
+  theme(axis.text.x.top = element_text(size = 6, angle = 45, hjust = 0, vjust = 0), axis.text.y = element_text(hjust = 0, vjust = 0.5))
+
+fig_kegg_two_panel <- fig_kegg_units_all + fig_class_enrich_aligned +
+  patchwork::plot_layout(nrow = 1, widths = c(2, 0.3))
+fig_kegg_two_panel
+# ggsave("figures/05-kegg-units-class-enrichment.svg", fig_kegg_two_panel, width = 10, height = 7)
+```
+
+> Left: robust-CLR expression of every KEGG level-B category per sample unit (13 vent, 6 non-vent); asterisks give |Cliff's delta| against the permuted largest |delta| (* 50th, ** 75th, *** 95th percentile; *** = significant). Right: representation of the same categories among KOs grouped by habitat association (log2 observed / expected KOs; black dots, BH q <= 0.05). Rows are grouped by level A and ordered within each group by Cliff's delta (vent focal), higher at vents on top, in both panels. Grey tiles in the right panel are categories with no mapped KOs in that group.
+
+
 > For results: categories over-represented among vent-associated KOs (red, large, starred) versus the shared background. Report counts with the q-values.
 
-# 5. Sensitivity: habitat classes at equal depth
+## Enrichment three ways, with the taxa behind each category
+
+The over-representation test above uses only KOs that clear the occupancy classes. Two rank-based versions use every mapped KO detected in at least `MIN_UNITS_RANK` units, ranked by Cliff's delta on rCLR (vent focal; the same statistic as the 95th-percentile permutation threshold contrasts and 07):
+
+* **Rank score, unit permutation.** Category score = mean delta of its KOs minus mean delta of all other KOs. The p-value comes from permuting habitat labels across the 19 units, which keeps the correlation among KOs intact; a test that only shuffles KOs ignores that correlation and is anti-conservative (Goeman & Bühlmann 2007; Wu & Smyth 2012). BH across categories.
+* **fgsea.** The same ranked list and level-B sets through `fgsea()` (Subramanian et al. 2005). Its p-values come from gene-set permutation, so they share that anti-conservative bias; shown for comparison with 07.
+* **Over-representation.** `fig_class_enrich` as above.
+
+Each is paired with the same taxa panel: for every category, the five class-level taxa with the largest contribution to the vent minus non-vent difference in its share of mapped expression (percentage points; mean over all units of a habitat, absent = 0). Contributions over all taxa sum to the category's total difference, marked with a tick. The panel is in expression units; the ORA counts KOs, so the two can disagree.
+
+```{r enrich-taxa-prep}
+#| message: true
+MIN_UNITS_RANK <- 2      # KO must be detected in at least this many units to be ranked
+N_PERM_SET     <- 4999   # unit-label permutations for the rank score
+N_TOP_TAXA     <- 5      # taxa shown per category
+
+# --- taxa responsible: contribution to each category's vent - non-vent difference ---
+hab_units <- count(units, vent_bin, name = "n_units")
+
+taxon_contrib <- unit_expression(kegg_long, c("cur_group", "cur_L4", "description")) |>
+  summarise(mass = sum(share), .by = c(vent_bin, cur_group, cur_L4, description)) |>
+  left_join(hab_units, by = "vent_bin") |>
+  mutate(mass = 100 * mass / n_units, vent_bin = as.character(vent_bin)) |>
+  select(-n_units) |>
+  pivot_wider(names_from = vent_bin, values_from = mass, values_fill = 0) |>
+  mutate(contrib_pp = Vent - `Non-vent`,
+         taxon      = taxon_label_unique(cur_L4))
+
+cat_total_pp <- taxon_contrib |>
+  summarise(total_pp = sum(contrib_pp), .by = description)
+
+# taxa contributions must add back to the category difference in kegg_by_habitat
+check_total <- kegg_by_habitat |>
+  transmute(description, expected_pp = 100 * (mean_share_Vent - `mean_share_Non-vent`)) |>
+  inner_join(cat_total_pp, by = "description")
+stopifnot(isTRUE(all.equal(check_total$expected_pp, check_total$total_pp, tolerance = 1e-6)))
+
+top_contrib <- taxon_contrib |>
+  slice_max(abs(contrib_pp), n = N_TOP_TAXA, by = description, with_ties = FALSE) |>
+  mutate(rank = row_number(desc(abs(contrib_pp))), .by = description)
+
+# --- ranked KOs: rCLR over all KOs, then the mapped, detected subset ---
+ko_rank_set <- ko_hab |>
+  filter(n_det_vent + n_det_nonvent >= MIN_UNITS_RANK) |>
+  pull(ko_id) |>
+  intersect(brite_map$ko_id)
+
+z_ko   <- composition_rclr(ko_unit, "ko_id")[, ko_rank_set]
+hab_ko <- set_names(units$vent_bin, units$unit)[rownames(z_ko)]
+is_vent <- hab_ko == "Vent"
+n_v <- sum(is_vent)
+n_n <- sum(!is_vent)
+
+# Cliff's delta from fixed within-KO ranks: only the labels move under permutation
+rank_mat <- apply(z_ko, 2, rank, ties.method = "average")
+delta_from_labels <- function(v) {
+  u <- colSums(rank_mat[v, , drop = FALSE]) - n_v * (n_v + 1) / 2
+  2 * u / (n_v * n_n) - 1
+}
+ko_delta <- delta_from_labels(is_vent)
+stopifnot(isTRUE(all.equal(unname(ko_delta),
+                           unname(contrast_ranks(z_ko, hab_ko, "Vent")))))  # matches the shared helper
+
+# KO x category membership (a KO counts once in each of its categories)
+ko_cat_b <- brite_map |>
+  filter(ko_id %in% colnames(z_ko)) |>
+  distinct(ko_id, description)
+memb <- ko_cat_b |>
+  mutate(x = 1) |>
+  pivot_wider(id_cols = ko_id, names_from = description, values_from = x, values_fill = 0) |>
+  column_to_rownames("ko_id") |>
+  as.matrix()
+memb  <- memb[colnames(z_ko), , drop = FALSE]
+set_n <- colSums(memb)
+
+message(glue("{ncol(z_ko)} mapped KOs ranked across {ncol(memb)} level-B categories."))
+```
+
+```{r enrich-rank-perm}
+#| message: true
+cat_score <- function(delta) {
+  in_sum <- drop(crossprod(memb, delta))
+  in_sum / set_n - (sum(delta) - in_sum) / (length(delta) - set_n)
+}
+
+set.seed(params$seed)
+score_obs  <- cat_score(ko_delta)
+score_null <- replicate(N_PERM_SET, cat_score(delta_from_labels(sample(is_vent))))
+
+rank_enrich <- tibble(description = names(score_obs),
+                      score       = score_obs,
+                      n_ko        = set_n[names(score_obs)],
+                      p_perm      = (1 + rowSums(abs(score_null) >= abs(score_obs))) /
+                                    (N_PERM_SET + 1)) |>
+  mutate(q_bh = p.adjust(p_perm, method = "BH"),
+         sig  = q_bh <= 0.05) |>
+  left_join(cat_order, by = "description")
+
+rank_enrich |>
+  arrange(q_bh) |>
+  mutate(across(where(is.double), \(x) signif(x, 3)))
+```
+
+```{r enrich-fgsea}
+#| message: true
+set.seed(params$seed)
+fgsea_b <- fgsea::fgsea(pathways = split(ko_cat_b$ko_id, ko_cat_b$description),
+                        stats    = ko_delta,
+                        minSize  = 5,
+                        eps      = 0) |>
+  as_tibble() |>
+  transmute(description = pathway, NES, n_ko = size, pval, padj,
+            sig = padj <= 0.05) |>
+  left_join(cat_order, by = "description")
+
+fgsea_b |>
+  arrange(padj) |>
+  mutate(across(where(is.double), \(x) signif(x, 3)))
+```
+
+```{r enrich-taxa-helpers}
+# left panel: one tile column per test, rows grouped by level A
+enrich_tile <- function(df, fill_var, fill_name, col_lab) {
+  lim <- max(abs(df[[fill_var]]), na.rm = TRUE)
+  df |>
+    mutate(description   = fct_reorder(description, .data[[fill_var]]),
+           a_description = str_wrap(a_description, 14),
+           col           = col_lab) |>
+    ggplot(aes(x = col, y = description)) +
+    geom_tile(aes(fill = .data[[fill_var]])) +
+    geom_text(data = \(d) filter(d, sig), label = "*", size = 5, vjust = 0.75) +
+    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0,
+                         limits = c(-lim, lim), name = fill_name) +
+    scale_x_discrete(position = "top") +
+    facet_grid(a_description ~ ., scales = "free_y", space = "free_y", switch = "y") +
+    labs(x = NULL, y = NULL) +
+    theme_minimal(base_size = 9) +
+    theme(panel.grid        = element_blank(),
+          strip.placement   = "outside",
+          strip.text.y.left = element_text(angle = 0, face = "bold", hjust = 1),
+          axis.text.x.top   = element_text(size = 7))
+}
+
+# right panel: top taxa per category, signed contribution, aligned to the left panel's rows
+taxa_panel <- function(cat_levels) {
+  facet_a <- cat_order |> mutate(a_description = str_wrap(a_description, 14))
+  bars <- top_contrib |>
+    filter(description %in% cat_levels) |>
+    left_join(facet_a, by = "description") |>
+    mutate(description = factor(description, levels = cat_levels),
+           cur_group   = factor(cur_group, levels = SUPERGROUP_0_ordering))
+  ticks <- cat_total_pp |>
+    filter(description %in% cat_levels) |>
+    left_join(facet_a, by = "description") |>
+    mutate(description = factor(description, levels = cat_levels))
+  dodge <- position_dodge(width = 0.85)
+
+  ggplot(bars, aes(x = contrib_pp, y = description, group = rank)) +
+    geom_vline(xintercept = 0, colour = "grey60", linewidth = 0.3) +
+    geom_col(aes(fill = cur_group), position = dodge, width = 0.8) +
+    geom_text(aes(label = taxon, hjust = if_else(contrib_pp >= 0, -0.05, 1.05)),
+              position = dodge, size = 1.8, colour = "grey10") +
+    geom_point(data = ticks, aes(x = total_pp, y = description), inherit.aes = FALSE,
+               shape = 124, size = 4) +
+    scale_fill_manual(values = tax_color_metaT, name = "Curated group", drop = TRUE) +
+    scale_x_continuous(expand = expansion(mult = 0.4)) +
+    facet_grid(a_description ~ ., scales = "free_y", space = "free_y") +
+    labs(x = "Contribution to vent − non-vent difference\n(percentage points of mapped expression)",
+         y = NULL) +
+    theme_minimal(base_size = 9) +
+    theme(axis.text.y        = element_blank(),
+          strip.text.y       = element_blank(),
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor   = element_blank())
+}
+
+with_taxa <- function(p_left, widths = c(1, 3)) {
+  p_left + taxa_panel(levels(p_left$data$description)) +
+    plot_layout(widths = widths, guides = "collect")
+}
+```
+
+```{r fig-enrich-rank-taxa}
+#| fig-width: 11
+#| fig-height: 14
+#| warning: false
+#| fig-cap: "Left: rank-based enrichment of KEGG level-B categories (vent focal). Fill is the mean Cliff's delta (rCLR, vent vs. non-vent units) of the category's KOs minus that of all other ranked KOs; red, KOs rank higher at vents. Asterisks mark BH q <= 0.05 from 4,999 permutations of habitat labels across the 19 units. Right: the five class-level taxa contributing most to the category's vent minus non-vent difference in share of mapped expression (percentage points), colored by curated group; the tick marks the total difference over all taxa."
+fig_enrich_rank_taxa <- rank_enrich |>
+  enrich_tile("score", "Rank score\n(mean Δ delta)",
+              glue("Rank score\n{ncol(z_ko)} KOs")) |>
+  with_taxa()
+fig_enrich_rank_taxa
+# ggsave("figures/05-enrich-rank-taxa.svg", fig_enrich_rank_taxa, width = 11, height = 14)
+```
+
+```{r fig-enrich-fgsea-taxa}
+#| fig-width: 11
+#| fig-height: 14
+#| warning: false
+#| fig-cap: "Left: fgsea normalized enrichment score (NES) for KEGG level-B categories on the same ranked KO list (vent focal; red, toward the vent end). Asterisks mark BH-adjusted p <= 0.05; these p-values come from gene-set permutation and do not account for correlation among KOs. Categories with fewer than 5 ranked KOs are not tested. Right: as in the rank-score figure."
+fig_enrich_fgsea_taxa <- fgsea_b |>
+  enrich_tile("NES", "NES", glue("fgsea\n{ncol(z_ko)} KOs")) |>
+  with_taxa()
+fig_enrich_fgsea_taxa
+# ggsave("figures/05-enrich-fgsea-taxa.svg", fig_enrich_fgsea_taxa, width = 11, height = 14)
+```
+
+```{r fig-enrich-ora-taxa}
+#| fig-width: 12
+#| fig-height: 14
+#| warning: false
+#| fig-cap: "Left: over-representation of KEGG level-B categories among KOs by habitat association, as in the figure above. Right: as in the rank-score figure. The left panel counts KOs; the right panel is expression, so a category can be over-represented among vent-associated KOs while its expression difference is carried by a few abundant taxa."
+fig_enrich_ora_taxa <- with_taxa(fig_class_enrich, widths = c(1.4, 3))
+fig_enrich_ora_taxa
+# ggsave("figures/05-enrich-ora-taxa.svg", fig_enrich_ora_taxa, width = 12, height = 14)
+```
+
+> For results: categories that agree across the three tests (rank-permutation is the one to report), and for each, whether the difference is carried by one taxon or spread across several.
+
+
+# Sensitivity: habitat classes at equal depth
 
 Each unit's KO (and taxon) totals, rounded to integer scaledTPM, are rarefied to the
 shallowest unit (`vegan::rrarefy`), `N_RAREFY` times. At equal depth, detected = at least
@@ -782,14 +1305,15 @@ rarefy_classes <- function(ue, by_col) {
     as.matrix()
   depth <- min(rowSums(mat))
   hab   <- units$vent_bin[match(rownames(mat), units$unit)]
+  bg    <- hab == "Non-vent" & !ventonly_tolerated(rownames(mat), hab, VENTONLY_TOLERATED)
   draws <- map(seq_len(N_RAREFY), \(i) {
     r <- vegan::rrarefy(mat, depth) > 0
     tibble(feature = colnames(mat),
            n_det_vent = colSums(r[hab == "Vent", , drop = FALSE]),
-           n_det_nonvent = colSums(r[hab == "Non-vent", , drop = FALSE])) |>
-      mutate(class = classify_habitat(n_det_vent / sum(hab == "Vent"),
-                                      n_det_nonvent / sum(hab == "Non-vent"),
-                                      n_det_vent, n_det_nonvent, OCC_MIN))
+           n_det_nonvent = colSums(r[hab == "Non-vent", , drop = FALSE]),
+           n_det_background = colSums(r[bg, , drop = FALSE])) |>
+      mutate(class = classify_habitat(n_det_vent, n_det_nonvent, n_det_background,
+                                      MIN_UNITS[["vent"]], MIN_UNITS[["nonvent"]]))
   })
   list(depth = depth,
        modal = bind_rows(draws) |>
@@ -840,6 +1364,7 @@ write_csv(rarefied_agreement, "output-tables/05_rarefied_agreement.csv")
 write_csv(composition_permanova, "output-tables/05_composition_permanova.csv")
 write_csv(composition_group,     "output-tables/05_composition_group.csv")
 write_csv(composition_taxon,     "output-tables/05_composition_taxon.csv")
+write_csv(composition_kegg,      "output-tables/05_composition_kegg.csv")   # Figure 3 left panel
 # hand-off to 06 and 07: one row per KO, habitat occupancy + class
 write_csv(ko_hab,       "output-tables/05_ko_habitat_class.csv")
 ```
@@ -849,7 +1374,8 @@ write_csv(ko_hab,       "output-tables/05_ko_habitat_class.csv")
 ```{r qc}
 stopifnot(
   all(unique(paired$field) %in% FIELDS_IN_SCOPE),
-  !any(grepl("Opisthokonta", paired$full_classification)),
+  !any(grepl("Opisthokonta", paired$full_classification) &
+         !grepl("Choanoflagell", paired$full_classification)),   # choanoflagellates only
   sum(units$vent_bin == "Vent") == 13, sum(units$vent_bin == "Non-vent") == 6,
   !anyDuplicated(ko_hab$ko_id), !anyDuplicated(tax_hab$cur_L4),
   # shares sum to 1 within each unit
@@ -857,9 +1383,9 @@ stopifnot(
   all(abs(summarise(tax_unit, s = sum(share), .by = unit)$s - 1) < 1e-8),
   # each class-level taxon sits in exactly one curated group
   !anyDuplicated(distinct(tax_unit, cur_group, cur_L4)$cur_L4),
-  # strict vent-only
-  all(ko_hab$n_det_nonvent[ko_hab$habitat_class == "vent_only"] == 0),
-  all(ko_hab$occ_vent[ko_hab$habitat_class %in% c("vent_only", "vent_skewed", "shared")] >= OCC_MIN),
+  # vent-only = never detected in background water (plume allowed)
+  all(ko_hab$n_det_background[ko_hab$habitat_class == "vent_only"] == 0),
+  all(ko_hab$n_det_vent[ko_hab$habitat_class %in% c("vent_only", "vent_skewed", "shared")] >= MIN_UNITS[["vent"]]),
   all(abs(summarise(class_kegg, s = sum(pct_of_mapped), .by = habitat_class)$s - 100) < 1e-6)
 )
 ```

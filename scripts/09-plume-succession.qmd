@@ -1,0 +1,451 @@
+---
+title: "09 — Background to plume to vent: succession of transcriptional signatures"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: show
+    df-print: paged
+---
+
+<!-- >SKH: 2026-11-17 standalone script, approved by Sarah 2026-11-21 (
+     not in _quarto.yml render list). Reads paired_L4.RData (02) and tables from 00c, 05;
+     changes nothing upstream. Reuses the subsampling helpers from 08. Untested. -->
+
+# Outline
+
+Question (Sarah, 2026-11-17): is there a succession of signatures that **appear in
+background seawater, increase in the plume, and persist at the vent**?
+
+Non-vent splits into 3 background units (Gorda Ridge BSW, Piccard, Von Damm) and 3 plume
+units (Gorda Ridge [2 replicates averaged], Piccard, Von Damm): one of each per field, so
+every plume-vs-background comparison is **paired by field**.
+
+Three readouts, at two levels (community = KO; lineage = class-level taxon x KO pair):
+
+1. **Zone patterns.** Each vent-associated feature is placed by where else it is
+   detected: vent only, plume + vent, background + vent, or all three zones.
+   _Emergence in the plume_ = more plume + vent features than background + vent features.
+2. **Increase.** Among features detected in all three zones, the share of features whose
+   expression share is higher in plume than in background **in every field**, and how many
+   of those also sit at or above the plume level at vents.
+3. **Community distance.** Per field, Aitchison (rCLR + Euclidean) distance from the plume
+   unit and from the background unit to the field's vent units. Succession predicts
+   plume closer to vent than background is, in all three fields.
+
+**Null (the only honest one at n = 3 + 3).** Swap the plume and background labels within
+fields. There are 2^3 = 8 labelings (the real one included); every statistic is recomputed
+for each. The real labeling can rank at best 1 of 8 (p = 0.125), so this is a consistency
+check, not a significance test. Per-field agreement (3 of 3 fields) is the replication.
+
+**Depth.** Plume units are shallower than background in 2 of 3 fields (KOs detected:
+plume 1,524 / 2,498 / 3,567; background 1,597 / 4,068 / 4,499; `05_depth_check.csv`).
+Detection-based readouts are run under three schemes:
+
+* `none`: no subsampling.
+* `pair_matched` (primary): within each field, the plume and background units are both
+  subsampled to the shallower of the two; vent units untouched. This equalises effort for
+  the plume-vs-background contrast that the question turns on.
+* `nonvent_to_vent`: as in 08, each non-vent unit subsampled to a depth drawn from the 13
+  vent unit depths.
+
+Share-based readouts (2 and 3) use unsubsampled expression.
+
+# Set up
+
+```{r setup}
+#| message: false
+#| warning: false
+source(if (file.exists("_setup.R")) "_setup.R" else "scripts/_setup.R")
+```
+
+```{r params}
+FIELDS_IN_SCOPE <- c("Gorda Ridge", "Von Damm", "Piccard")
+CHOSEN_DEPTH <- 4
+MIN_TPM <- params$detect_min_tpm                 # 1
+MIN_PER_MILLION <- params$detect_min_per_million # 10
+VENT_MIN_UNITS <- params$vent_min_units          # 05 rule (2026-11-23): >= 3 of 13 vent units
+ZONE_MIN_SWEEP <- c(1, 2)                        # plume / background presence: >= 1 or >= 2 of 3 units
+
+N_DRAWS <- 100
+SCHEMES <- c("none", "pair_matched", "nonvent_to_vent")
+ZONES <- c("background", "plume", "vent")
+PREV_MIN <- 4      # units a KO must be detected in for the rCLR matrix
+
+PANEL_TABLE <- "data/gene-lists/gene_candidates_central.csv" # 00c
+TAXON_TABLE <- "output-tables/05_taxon_habitat.csv"          # 05
+```
+
+```{r data}
+#| message: true
+paired <- load_paired(fields = FIELDS_IN_SCOPE, depth = CHOSEN_DEPTH)
+
+# zone from the unit name: "<field>_Non-vent_<site>"; BSW counts as background
+zone_of <- function(unit, vent_bin) {
+  factor(case_when(vent_bin == "Vent"            ~ "vent",
+                   str_detect(unit, "_Plume$")   ~ "plume",
+                   TRUE                          ~ "background"), levels = ZONES)
+}
+
+units <- paired |>
+  distinct(unit = sample_unit, vent_bin, field) |>
+  mutate(zone = zone_of(unit, vent_bin)) |>
+  arrange(zone, field, unit)
+units |> count(zone, field)
+stopifnot(
+  sum(units$zone == "vent") == 13,
+  all(count(filter(units, zone != "vent"), field, zone)$n == 1))   # one plume + one background per field
+
+pair_unit <- unit_expression(paired, c("cur_L4", "ko_id"), MIN_TPM, MIN_PER_MILLION)
+ko_unit   <- unit_expression(paired, "ko_id", MIN_TPM, MIN_PER_MILLION)
+rm(paired)
+
+panel_kos <- read_csv(PANEL_TABLE, show_col_types = FALSE) |>
+  filter(!is.na(subcategory), status != "unresolved", match_type == "ko") |>
+  distinct(feature_id) |>
+  pull(feature_id)
+
+tax_hab <- read_csv(TAXON_TABLE, show_col_types = FALSE) |>
+  select(cur_L4, taxon_habitat = habitat_class)
+
+vent_min <- VENT_MIN_UNITS   # 3 (was 4 under the 30% rule)
+# 05's vent-only (no background detection, plume allowed) = this script's vent_only + plume_vent
+```
+
+# Labelings: the real one and the 7 within-field swaps
+
+```{r labelings}
+nonvent_units <- units |> filter(zone != "vent")
+
+# swap = TRUE flips plume <-> background in that field
+labelings <- expand_grid(!!!set_names(rep(list(c(FALSE, TRUE)), length(FIELDS_IN_SCOPE)),
+                                      FIELDS_IN_SCOPE)) |>
+  mutate(labeling = row_number(), real = if_all(all_of(FIELDS_IN_SCOPE), \(x) !x)) |>
+  pivot_longer(all_of(FIELDS_IN_SCOPE), names_to = "field", values_to = "swap")
+
+relabel <- function(lab_id) {
+  sw <- labelings |> filter(labeling == lab_id)
+  units |>
+    left_join(select(sw, field, swap), by = "field") |>
+    mutate(zone = case_when(zone == "vent" ~ "vent",
+                            swap & zone == "plume" ~ "background",
+                            swap & zone == "background" ~ "plume",
+                            TRUE ~ as.character(zone)),
+           zone = factor(zone, levels = ZONES)) |>
+    select(unit, field, zone)
+}
+stopifnot(n_distinct(labelings$labeling) == 8, sum(distinct(labelings, labeling, real)$real) == 1)
+```
+
+# 1. Zone patterns (emergence)
+
+```{r patterns}
+count_by_zone <- function(det, unit_zone, by) {
+  det |>
+    filter(detected) |>
+    inner_join(unit_zone, by = "unit") |>
+    count(across(all_of(c(by, "zone"))), name = "n_det") |>
+    pivot_wider(names_from = zone, values_from = n_det, names_prefix = "n_", values_fill = 0) |>
+    (\(x) { for (z in paste0("n_", ZONES)) if (!z %in% names(x)) x[[z]] <- 0L; x })()
+}
+
+zone_pattern <- function(n_background, n_plume, n_vent, zone_min) {
+  in_b <- n_background >= zone_min
+  in_p <- n_plume >= zone_min
+  in_v <- n_vent >= vent_min
+  factor(case_when(
+    in_v & n_background == 0 & n_plume == 0 ~ "vent_only",
+    in_v & in_p & n_background == 0         ~ "plume_vent",
+    in_v & in_b & n_plume == 0              ~ "background_vent",
+    in_v & in_p & in_b                      ~ "all_three",
+    in_v                                    ~ "vent_plus_sparse",   # non-vent detections below zone_min
+    in_p & n_background == 0 & n_vent == 0  ~ "plume_only",
+    in_b & n_plume == 0 & n_vent == 0       ~ "background_only",
+    in_p | in_b                             ~ "nonvent_other",
+    TRUE                                    ~ "below_filter"),
+    levels = c("vent_only", "plume_vent", "all_three", "background_vent", "vent_plus_sparse",
+               "plume_only", "background_only", "nonvent_other", "below_filter"))
+}
+
+# emergence summary for one detection table x one labeling x one zone rule
+emergence <- function(counts, zone_min, panel = NULL) {
+  pat <- counts |>
+    mutate(pattern = zone_pattern(n_background, n_plume, n_vent, zone_min))
+  if (!is.null(panel)) pat <- filter(pat, ko_id %in% panel)
+  n_pv <- sum(pat$pattern == "plume_vent")
+  n_bv <- sum(pat$pattern == "background_vent")
+  list(patterns = count(pat, pattern, .drop = FALSE),
+       stat = tibble(n_plume_vent = n_pv, n_background_vent = n_bv,
+                     plume_bias = n_pv / (n_pv + n_bv)))   # 0.5 = no asymmetry
+}
+```
+
+## Subsampling (helpers from 08)
+
+```{r subsample}
+pair_counts <- pair_unit |>
+  transmute(unit, vent_bin, field, cur_L4, ko_id, count = as.integer(floor(tpm))) |>   # floor: as 08
+  filter(count > 0)
+unit_depth <- pair_counts |>
+  summarise(depth = sum(count), .by = c(unit, vent_bin, field)) |>
+  mutate(zone = zone_of(unit, vent_bin))
+vent_depths <- unit_depth$depth[unit_depth$zone == "vent"]
+unit_ref <- pair_unit |>
+  distinct(unit, unit_total_05 = unit_total) |>
+  left_join(select(unit_depth, unit, depth), by = "unit")
+
+subsample_counts <- function(counts, depth) {
+  if (depth >= sum(counts)) return(counts)
+  tabulate(sample(rep.int(seq_along(counts), counts), depth), nbins = length(counts))
+}
+
+draw_targets <- function(scheme) {
+  d <- mutate(unit_depth, target = depth)
+  if (scheme == "pair_matched")
+    d <- d |> mutate(target = if_else(zone == "vent", depth, min(depth[zone != "vent"])),
+                     .by = field)
+  if (scheme == "nonvent_to_vent") {
+    nv <- d$zone != "vent"
+    d$target[nv] <- pmin(d$depth[nv], sample(vent_depths, sum(nv)))
+  }
+  d
+}
+
+subsample_table <- function(scheme) {
+  if (scheme == "none") return(pair_counts)
+  pair_counts |>
+    left_join(select(draw_targets(scheme), unit, target), by = "unit") |>
+    mutate(count = subsample_counts(count, first(target)), .by = unit) |>
+    filter(count > 0) |>
+    select(-target)
+}
+
+# same rule and denominator as 08 (05's unit total scaled by the share of counts kept)
+detect_counts <- function(sub, by) {
+  kept <- sub |>
+    summarise(unit_total = sum(count), .by = unit) |>
+    left_join(unit_ref, by = "unit") |>
+    mutate(denom = unit_total_05 * unit_total / depth) |>
+    select(unit, unit_total, denom)
+  sub |>
+    summarise(count = sum(count), .by = all_of(c("unit", by))) |>
+    left_join(kept, by = "unit") |>
+    mutate(detected = count >= MIN_TPM & count / denom * 1e6 >= MIN_PER_MILLION) |>
+    select(-denom)
+}
+```
+
+```{r run-emergence}
+#| message: true
+runs <- expand_grid(scheme = SCHEMES, draw = seq_len(N_DRAWS)) |>
+  filter(scheme != "none" | draw == 1)
+unit_zones <- map(set_names(1:8), relabel)
+
+set.seed(params$seed)
+t0 <- Sys.time()
+emerge <- pmap(runs, \(scheme, draw) {
+  det <- if (scheme == "none") {
+    list(KO = ko_unit, pair = pair_unit)        # unsubsampled: the 05 detections exactly
+  } else {
+    sub <- subsample_table(scheme)
+    list(KO = detect_counts(sub, "ko_id"), pair = detect_counts(sub, c("cur_L4", "ko_id")))
+  }
+  out <- expand_grid(labeling = 1:8, level = c("KO", "KO_panel", "pair"), zone_min = ZONE_MIN_SWEEP) |>
+    pmap(\(labeling, level, zone_min) {
+      by  <- if (level == "pair") c("cur_L4", "ko_id") else "ko_id"
+      tab <- if (level == "pair") det$pair else det$KO
+      cnt <- count_by_zone(tab, unit_zones[[labeling]], by)
+      e   <- emergence(cnt, zone_min, panel = if (level == "KO_panel") panel_kos else NULL)
+      key <- tibble(scheme = scheme, draw = draw, labeling = labeling, level = level, zone_min = zone_min)
+      list(stat = bind_cols(key, e$stat), patterns = bind_cols(key, e$patterns),
+           pairs = if (level == "pair" && labeling == 1 && scheme == "none")
+             mutate(cnt, pattern = zone_pattern(n_background, n_plume, n_vent, zone_min),
+                    zone_min = zone_min) else NULL)
+    })
+  list_transpose(out) |> map(bind_rows)
+}) |> list_transpose() |> map(bind_rows)
+message(glue("{nrow(runs)} draws x 8 labelings in ",
+             "{round(difftime(Sys.time(), t0, units = 'mins'), 1)} min"))
+
+emerge$stat <- emerge$stat |>
+  left_join(distinct(labelings, labeling, real), by = "labeling")
+```
+
+## Emergence: plume + vent vs background + vent
+
+```{r emergence-summary}
+q <- \(x, p) unname(quantile(x, p, na.rm = TRUE))
+
+emergence_summary <- emerge$stat |>
+  summarise(across(c(n_plume_vent, n_background_vent, plume_bias),
+                   list(med = median, lo = \(x) q(x, 0.025), hi = \(x) q(x, 0.975))),
+            .by = c(scheme, level, zone_min, labeling, real)) |>
+  # rank of the real labeling among the 8 (1 = strongest plume bias)
+  mutate(rank_of_8 = rank(-plume_bias_med, ties.method = "max"),
+         .by = c(scheme, level, zone_min))
+
+emergence_summary |>
+  filter(real) |>
+  select(scheme, level, zone_min, n_plume_vent_med, n_background_vent_med,
+         plume_bias_med, plume_bias_lo, plume_bias_hi, rank_of_8) |>
+  arrange(level, zone_min, scheme)
+```
+
+> For results: succession predicts `plume_bias` > 0.5 under `pair_matched`, with an
+> interval above 0.5 and the real labeling ranked 1 of 8. Labeling 8 (all fields
+> swapped) is the mirror image, so it should rank last.
+
+```{r fig-patterns}
+#| fig-width: 9
+#| fig-height: 4
+fig_patterns <- emerge$patterns |>
+  filter(labeling == 1, zone_min == 1, level != "KO_panel",
+         pattern %in% c("vent_only", "plume_vent", "all_three", "background_vent")) |>
+  summarise(n = median(n), .by = c(scheme, level, pattern)) |>
+  ggplot(aes(pattern, n, fill = scheme)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ level, scales = "free_y", labeller = as_labeller(c(KO = "KOs", pair = "Lineage x KO pairs"))) +
+  scale_fill_manual(values = c(none = "grey60", pair_matched = "#b74a70", nonvent_to_vent = "#3b6ea5")) +
+  labs(x = NULL, y = "Vent-associated features (median of draws)", fill = "Depth scheme") +
+  theme_bw(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "bottom")
+fig_patterns
+```
+
+## Which lineages carry the plume + vent pairs
+
+Unsubsampled, real labeling.
+
+```{r bridge-lineages}
+bridge_lineages <- emerge$pairs |>
+  filter(pattern %in% c("plume_vent", "background_vent", "all_three")) |>
+  count(zone_min, cur_L4, pattern) |>
+  pivot_wider(names_from = pattern, values_from = n, values_fill = 0) |>
+  left_join(tax_hab, by = "cur_L4") |>
+  arrange(zone_min, desc(plume_vent))
+bridge_lineages |> filter(zone_min == 1) |> slice_head(n = 20)
+```
+
+# 2. Increase: higher in plume than background, persisting at vents
+
+Unsubsampled shares. For features detected in all three zones (pattern `all_three`,
+zone_min = 1), per field: `plume > background` share. Vent level = median share over the
+13 vent units (zeros included).
+
+```{r increase}
+share_by_zone <- function(ue, by, unit_zone) {
+  ue |>
+    select(all_of(c("unit", by, "share"))) |>
+    complete(unit = units$unit, nesting(!!!rlang::syms(by)), fill = list(share = 0)) |>
+    inner_join(unit_zone, by = "unit")
+}
+
+increase_stats <- function(ue, by, unit_zone, keep) {
+  sz <- share_by_zone(semi_join(ue, keep, by = by), by, unit_zone)
+  nv <- sz |>
+    filter(zone != "vent") |>
+    select(-unit) |>
+    pivot_wider(names_from = zone, values_from = share) |>
+    summarise(n_fields_up = sum(plume > background),
+              plume_mean  = mean(plume), background_mean = mean(background),
+              .by = all_of(by))
+  vt <- sz |> filter(zone == "vent") |>
+    summarise(vent_median = median(share), .by = all_of(by))
+  nv |>
+    left_join(vt, by = by) |>
+    mutate(succession = n_fields_up == 3 & vent_median >= plume_mean)
+}
+
+increase_runs <- expand_grid(labeling = 1:8, level = c("KO", "pair")) |>
+  pmap(\(labeling, level) {
+    by  <- if (level == "pair") c("cur_L4", "ko_id") else "ko_id"
+    ue  <- if (level == "pair") pair_unit else ko_unit
+    # all-three set fixed from the real labeling (it does not depend on the swap)
+    keep <- count_by_zone(ue, unit_zones[[1]], by) |>
+      filter(zone_pattern(n_background, n_plume, n_vent, 1) == "all_three") |>
+      select(all_of(by))
+    st <- increase_stats(ue, by, unit_zones[[labeling]], keep)
+    list(summary = tibble(labeling = labeling, level = level, n_all_three = nrow(st),
+                          n_up_3of3 = sum(st$n_fields_up == 3),
+                          n_down_3of3 = sum(st$n_fields_up == 0),
+                          n_succession = sum(st$succession),
+                          n_succession_panel = if (level == "KO")
+                            sum(st$succession & st$ko_id %in% panel_kos) else NA_integer_),
+         features = if (labeling == 1) mutate(st, level = level) else NULL)
+  }) |>
+  list_transpose() |>
+  map(bind_rows)
+
+increase_summary <- increase_runs$summary |>
+  left_join(distinct(labelings, labeling, real), by = "labeling") |>
+  mutate(rank_of_8 = rank(-n_succession, ties.method = "max"), .by = level)
+increase_summary |> arrange(level, labeling)
+```
+
+> For results: under no field-consistent plume effect, `n_up_3of3` and `n_down_3of3`
+> are similar (each field is a coin flip, so ~1/8 of features land in each). Succession
+> = `n_up_3of3` clearly above `n_down_3of3`, and the real labeling at rank 1.
+
+# 3. Community distance: is plume closer to vent than background is?
+
+rCLR (`vegan::decostand(method = "rclr")`) on unit x KO shares, Euclidean distance
+(Aitchison). Per field: mean distance from the plume unit, and from the background unit,
+to that field's vent units, and to all 13 vent units.
+
+```{r distance}
+ko_mat <- ko_unit |>
+  filter(detected) |>
+  select(unit, ko_id, tpm) |>
+  pivot_wider(names_from = ko_id, values_from = tpm, values_fill = 0) |>
+  column_to_rownames("unit") |>
+  as.matrix()
+ko_mat <- ko_mat[, colSums(ko_mat > 0) >= PREV_MIN, drop = FALSE]   # as prevalence_filter(..., 4)
+aitch <- as.matrix(dist(vegan::decostand(ko_mat, method = "rclr")))
+
+dist_to_vent <- units |>
+  filter(zone != "vent") |>
+  mutate(
+    d_vent_same_field = map2_dbl(unit, field, \(u, f)
+      mean(aitch[u, units$unit[units$zone == "vent" & units$field == f]])),
+    d_vent_all = map_dbl(unit, \(u) mean(aitch[u, units$unit[units$zone == "vent"]]))) |>
+  select(field, zone, d_vent_same_field, d_vent_all) |>
+  pivot_wider(names_from = zone, values_from = c(d_vent_same_field, d_vent_all)) |>
+  mutate(plume_closer_same = d_vent_same_field_plume < d_vent_same_field_background,
+         plume_closer_all  = d_vent_all_plume < d_vent_all_background)
+dist_to_vent
+```
+
+> For results: succession predicts `plume_closer_*` TRUE in all three fields. Depth caveat:
+> rCLR distances are not rarefied here; if plume closeness tracks depth rather than zone,
+> rerun on a `pair_matched` subsample (one draw is enough for a check).
+
+# Write
+
+```{r write}
+write_csv(emergence_summary,          "output-tables/09_emergence_summary.csv")
+write_csv(emerge$patterns,            "output-tables/09_zone_patterns_draws.csv")
+write_csv(emerge$pairs,               "output-tables/09_pair_zone_patterns.csv")
+write_csv(bridge_lineages,            "output-tables/09_bridge_lineages.csv")
+write_csv(increase_summary,           "output-tables/09_increase_summary.csv")
+write_csv(increase_runs$features,     "output-tables/09_increase_features.csv")
+write_csv(dist_to_vent,               "output-tables/09_distance_to_vent.csv")
+```
+
+# QC
+
+```{r qc}
+stopifnot(
+  # each labeling keeps 3 plume + 3 background units, one per field
+  all(map_lgl(unit_zones, \(uz) all(count(filter(uz, zone != "vent"), field, zone)$n == 1))),
+  # the all-swapped labeling mirrors the real one at every level and rule (unsubsampled)
+  emerge$stat |> filter(scheme == "none") |>
+    select(level, zone_min, labeling, n_plume_vent, n_background_vent) |>
+    (\(s) { r <- filter(s, labeling == 1); m <- filter(s, labeling == 8)
+            all(r$n_plume_vent == m$n_background_vent) })(),
+  # vents are never subsampled under pair_matched
+  all(draw_targets("pair_matched") |> filter(zone == "vent") |> with(target == depth)),
+  # pair_matched gives equal targets to plume and background within each field
+  draw_targets("pair_matched") |> filter(zone != "vent") |>
+    summarise(k = n_distinct(target), .by = field) |> with(all(k == 1)))
+```
